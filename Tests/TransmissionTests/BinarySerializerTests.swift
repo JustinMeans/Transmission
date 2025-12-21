@@ -507,17 +507,17 @@ struct WireProtocolBenchmarks {
 
         let jsonEncoder = JSONEncoder()
 
-        let compactStart = CFAbsoluteTimeGetCurrent()
+        let compactStart = Date().timeIntervalSinceReferenceDate
         for _ in 0..<Self.iterations {
             _ = wireEnvelope.encodeCompact()
         }
-        let compactDuration = CFAbsoluteTimeGetCurrent() - compactStart
+        let compactDuration = Date().timeIntervalSinceReferenceDate - compactStart
 
-        let jsonStart = CFAbsoluteTimeGetCurrent()
+        let jsonStart = Date().timeIntervalSinceReferenceDate
         for _ in 0..<Self.iterations {
             _ = try jsonEncoder.encode(wireEnvelope)
         }
-        let jsonDuration = CFAbsoluteTimeGetCurrent() - jsonStart
+        let jsonDuration = Date().timeIntervalSinceReferenceDate - jsonStart
 
         let speedup = jsonDuration / compactDuration
         print("Encoding \(Self.iterations) envelopes - Compact: \(String(format: "%.3f", compactDuration))s, JSON: \(String(format: "%.3f", jsonDuration))s, Speedup: \(String(format: "%.2f", speedup))x")
@@ -540,18 +540,18 @@ struct WireProtocolBenchmarks {
         let compactData = wireEnvelope.encodeCompact()
         let jsonData = try JSONEncoder().encode(wireEnvelope)
 
-        let compactStart = CFAbsoluteTimeGetCurrent()
+        let compactStart = Date().timeIntervalSinceReferenceDate
         for _ in 0..<Self.iterations {
             _ = try WireEnvelope.decodeCompact(from: compactData)
         }
-        let compactDuration = CFAbsoluteTimeGetCurrent() - compactStart
+        let compactDuration = Date().timeIntervalSinceReferenceDate - compactStart
 
         let jsonDecoder = JSONDecoder()
-        let jsonStart = CFAbsoluteTimeGetCurrent()
+        let jsonStart = Date().timeIntervalSinceReferenceDate
         for _ in 0..<Self.iterations {
             _ = try jsonDecoder.decode(WireEnvelope.self, from: jsonData)
         }
-        let jsonDuration = CFAbsoluteTimeGetCurrent() - jsonStart
+        let jsonDuration = Date().timeIntervalSinceReferenceDate - jsonStart
 
         let speedup = jsonDuration / compactDuration
         print("Decoding \(Self.iterations) envelopes - Compact: \(String(format: "%.3f", compactDuration))s, JSON: \(String(format: "%.3f", jsonDuration))s, Speedup: \(String(format: "%.2f", speedup))x")
@@ -574,19 +574,19 @@ struct WireProtocolBenchmarks {
         let jsonEncoder = JSONEncoder()
         let jsonDecoder = JSONDecoder()
 
-        let compactStart = CFAbsoluteTimeGetCurrent()
+        let compactStart = Date().timeIntervalSinceReferenceDate
         for _ in 0..<Self.iterations {
             let data = wireEnvelope.encodeCompact()
             _ = try WireEnvelope.decodeCompact(from: data)
         }
-        let compactDuration = CFAbsoluteTimeGetCurrent() - compactStart
+        let compactDuration = Date().timeIntervalSinceReferenceDate - compactStart
 
-        let jsonStart = CFAbsoluteTimeGetCurrent()
+        let jsonStart = Date().timeIntervalSinceReferenceDate
         for _ in 0..<Self.iterations {
             let data = try jsonEncoder.encode(wireEnvelope)
             _ = try jsonDecoder.decode(WireEnvelope.self, from: data)
         }
-        let jsonDuration = CFAbsoluteTimeGetCurrent() - jsonStart
+        let jsonDuration = Date().timeIntervalSinceReferenceDate - jsonStart
 
         let speedup = jsonDuration / compactDuration
         print("Round-trip \(Self.iterations) envelopes - Compact: \(String(format: "%.3f", compactDuration))s, JSON: \(String(format: "%.3f", jsonDuration))s, Speedup: \(String(format: "%.2f", speedup))x")
@@ -617,21 +617,21 @@ struct WireProtocolBenchmarks {
         let jsonDecoder = JSONDecoder()
 
         for _ in 0..<1000 {
-            let start1 = CFAbsoluteTimeGetCurrent()
+            let start1 = Date().timeIntervalSinceReferenceDate
             let compactData = wireEnvelope.encodeCompact()
-            compactEncodeTimes.append(CFAbsoluteTimeGetCurrent() - start1)
+            compactEncodeTimes.append(Date().timeIntervalSinceReferenceDate - start1)
 
-            let start2 = CFAbsoluteTimeGetCurrent()
+            let start2 = Date().timeIntervalSinceReferenceDate
             _ = try WireEnvelope.decodeCompact(from: compactData)
-            compactDecodeTimes.append(CFAbsoluteTimeGetCurrent() - start2)
+            compactDecodeTimes.append(Date().timeIntervalSinceReferenceDate - start2)
 
-            let start3 = CFAbsoluteTimeGetCurrent()
+            let start3 = Date().timeIntervalSinceReferenceDate
             let jsonData = try jsonEncoder.encode(wireEnvelope)
-            jsonEncodeTimes.append(CFAbsoluteTimeGetCurrent() - start3)
+            jsonEncodeTimes.append(Date().timeIntervalSinceReferenceDate - start3)
 
-            let start4 = CFAbsoluteTimeGetCurrent()
+            let start4 = Date().timeIntervalSinceReferenceDate
             _ = try jsonDecoder.decode(WireEnvelope.self, from: jsonData)
-            jsonDecodeTimes.append(CFAbsoluteTimeGetCurrent() - start4)
+            jsonDecodeTimes.append(Date().timeIntervalSinceReferenceDate - start4)
         }
 
         let compactEncodeAvg = compactEncodeTimes.reduce(0, +) / Double(compactEncodeTimes.count) * 1_000_000
