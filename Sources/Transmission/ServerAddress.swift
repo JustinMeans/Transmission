@@ -27,7 +27,7 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
             return nil
         }
 
-        guard let host = parsed.host else { return nil }
+        guard let host = parsed.host, !host.isEmpty else { return nil }
 
         let port = parsed.port ?? (scheme == .secure ? 443 : 80)
         let path = parsed.path.isEmpty ? "/transmission" : parsed.path
