@@ -12,14 +12,8 @@ let package = Package(
         .visionOS(.v1)
     ],
     products: [
-        .library(
-            name: "Transmission",
-            targets: ["Transmission"]
-        ),
-        .library(
-            name: "TransmissionVapor",
-            targets: ["TransmissionVapor"]
-        ),
+        .library(name: "Transmission", targets: ["Transmission"]),
+        .library(name: "TransmissionVapor", targets: ["TransmissionVapor"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.70.0"),
@@ -37,7 +31,7 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOWebSocket", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
+                .product(name: "NIOTransportServices", package: "swift-nio-transport-services", condition: .when(platforms: [.macOS, .iOS, .tvOS, .watchOS, .visionOS])),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Metrics", package: "swift-metrics"),
             ],
