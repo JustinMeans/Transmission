@@ -106,7 +106,7 @@ public struct CompactDecoder: Sendable {
 
     public mutating func readVarintSigned() throws -> Int64 {
         let unsigned = try readVarint()
-        let signed = Int64(bitPattern: (unsigned >> 1) ^ (~(unsigned & 1) + 1))
+        let signed = Int64(bitPattern: (unsigned >> 1) ^ (0 &- (unsigned & 1)))
         return signed
     }
 
