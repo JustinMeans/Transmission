@@ -33,10 +33,21 @@ extension Application {
                 throw Abort(.internalServerError, reason: "TransmissionSystem not registered")
             }
 
+            let serverNodeID = system.nodeID.id
             let routes = application.grouped(middleware)
-            routes.webSocket(PathComponent(stringLiteral: path)) { req, ws in
-                await VaporWebSocketBridge.handleWebSocket(req: req, ws: ws, system: system)
-            }
+            routes.webSocket(
+                PathComponent(stringLiteral: path),
+                shouldUpgrade: { req in
+                    var headers = HTTPHeaders()
+                    headers.add(name: "X-Server-Node-ID", value: serverNodeID)
+                    return req.eventLoop.makeSucceededFuture(headers)
+                },
+                onUpgrade: { req, ws in
+                    Task {
+                        await VaporWebSocketBridge.handleWebSocket(req: req, ws: ws, system: system)
+                    }
+                }
+            )
         }
     }
 }
@@ -94,10 +105,15 @@ public actor VaporWebSocketBridge {
 
     private func processMessage(_ data: Data) async {
         do {
-            let decoder = JSONDecoder()
-            decoder.userInfo[.transmissionSystem] = system
+            let envelope: WireEnvelope
 
-            let envelope = try decoder.decode(WireEnvelope.self, from: data)
+            if let firstByte = data.first, firstByte <= 2 {
+                envelope = try WireEnvelope.decodeCompact(from: data)
+            } else {
+                let decoder = JSONDecoder()
+                decoder.userInfo[.transmissionSystem] = system
+                envelope = try decoder.decode(WireEnvelope.self, from: data)
+            }
 
             switch envelope {
             case .call(let call):
@@ -113,11 +129,10 @@ public actor VaporWebSocketBridge {
     }
 
     private func handleCall(_ call: CallEnvelope) async {
-        // Capture ws for the sendReply closure
         let wsRef = ws
 
         await system.handleCall(call) { replyData in
-            try await wsRef.send(raw: replyData, opcode: .text)
+            try await wsRef.send(raw: replyData, opcode: .binary)
         }
     }
 
