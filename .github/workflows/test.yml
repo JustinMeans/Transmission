@@ -22,4 +22,11 @@ jobs:
         run: swift build
 
       - name: Run Tests
-        run: swift test --parallel
+        run: swift test --parallel --xunit-output test-results.xml
+
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-results.xml
+          check_name: Test Results
