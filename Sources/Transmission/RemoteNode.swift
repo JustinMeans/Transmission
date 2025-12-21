@@ -27,19 +27,32 @@ public actor RemoteNode {
         self.outbound = outbound
     }
 
+    /// Serialization format for this connection. Defaults to binary for optimal performance.
+    public var serializationFormat: SerializationFormat = .binary
+
     /// Sends a wire envelope to this remote node.
     public func send(_ envelope: WireEnvelope) async throws {
         guard !isClosed else {
             throw TransmissionError.noConnection
         }
 
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(envelope)
+        let data: Data
+        let opcode: WebSocketOpcode
+
+        switch serializationFormat {
+        case .binary:
+            data = envelope.encodeCompact()
+            opcode = .binary
+        case .json:
+            let encoder = JSONEncoder()
+            data = try encoder.encode(envelope)
+            opcode = .text
+        }
 
         var buffer = channel.channel.allocator.buffer(capacity: data.count)
         buffer.writeBytes(data)
 
-        let frame = WebSocketFrame(fin: true, opcode: .text, data: buffer)
+        let frame = WebSocketFrame(fin: true, opcode: opcode, data: buffer)
         try await outbound.write(frame)
     }
 

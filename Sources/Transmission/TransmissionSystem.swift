@@ -131,7 +131,11 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
 
     /// Handles an incoming call envelope and returns the reply data.
     /// This provides a clean integration point for custom transport layers.
-    public func handleCall(_ call: CallEnvelope, sendReply: @escaping @Sendable (Data) async throws -> Void) async {
+    /// - Parameters:
+    ///   - call: The incoming call envelope
+    ///   - format: Serialization format for the reply (defaults to binary for optimal performance)
+    ///   - sendReply: Callback to send the reply data
+    public func handleCall(_ call: CallEnvelope, format: SerializationFormat = .binary, sendReply: @escaping @Sendable (Data) async throws -> Void) async {
         do {
             guard let actor = lookupActor(id: call.recipient) else {
                 throw TransmissionError.actorNotFound(call.recipient)
@@ -158,8 +162,14 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
                 value: resultBox.value
             )
 
-            let encoder = JSONEncoder()
-            let replyData = try encoder.encode(WireEnvelope.reply(reply))
+            let wireEnvelope = WireEnvelope.reply(reply)
+            let replyData: Data
+            switch format {
+            case .binary:
+                replyData = wireEnvelope.encodeCompact()
+            case .json:
+                replyData = try JSONEncoder().encode(wireEnvelope)
+            }
             try await sendReply(replyData)
         } catch {
             logger.error("Failed to handle call: \(error)")
@@ -238,12 +248,20 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
     // MARK: - Message Handling
 
     /// Decodes and delivers an incoming message from a remote node.
+    /// Automatically detects binary vs JSON format based on the data.
     public func decodeAndDeliver(data: Data, from node: RemoteNode) async {
         do {
-            let decoder = JSONDecoder()
-            decoder.userInfo[.transmissionSystem] = self
+            let envelope: WireEnvelope
 
-            let envelope = try decoder.decode(WireEnvelope.self, from: data)
+            // Detect format: binary format starts with type byte (0, 1, or 2)
+            // JSON format starts with '{' (0x7B) for object
+            if let firstByte = data.first, firstByte <= 2 {
+                envelope = try WireEnvelope.decodeCompact(from: data)
+            } else {
+                let decoder = JSONDecoder()
+                decoder.userInfo[.transmissionSystem] = self
+                envelope = try decoder.decode(WireEnvelope.self, from: data)
+            }
 
             switch envelope {
             case .call(let call):
