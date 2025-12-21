@@ -12,55 +12,94 @@ import NIOPosix
 
 public actor ClientManager {
     private let system: TransmissionSystem
-    private var connection: ResilientConnection?
+    private var connectionTask: Task<Void, Never>?
     private var statusHandler: (@Sendable (ConnectionStatus) async -> Void)?
+    private var currentStatus: ConnectionStatus = .disconnected
+    private var backoff = ExponentialBackoff.standard
 
     init(system: TransmissionSystem) {
         self.system = system
     }
 
     public func connect(to address: ServerAddress, onStatus: (@Sendable (ConnectionStatus) async -> Void)? = nil) {
+        connectionTask?.cancel()
         self.statusHandler = onStatus
 
-        // Capture system reference for use in nonisolated context
         let systemRef = system
 
-        connection = ResilientConnection(
-            backoff: .standard,
-            onStatusChange: onStatus
-        ) {
-            try await ClientConnectionHandler.establishConnection(to: address, system: systemRef)
-        }
-
-        Task {
-            await connection?.start()
+        connectionTask = Task { [weak self] in
+            guard let self else { return }
+            await self.connectionLoop(address: address, system: systemRef)
         }
     }
 
     public func disconnect() async {
-        await connection?.stop()
-        connection = nil
+        connectionTask?.cancel()
+        connectionTask = nil
+        await updateStatus(.disconnected)
     }
 
     public var status: ConnectionStatus {
-        get async {
-            await connection?.currentStatus ?? .disconnected
+        currentStatus
+    }
+
+    private func connectionLoop(address: ServerAddress, system: TransmissionSystem) async {
+        var attempt = 0
+
+        while !Task.isCancelled {
+            attempt += 1
+            await updateStatus(attempt == 1 ? .connecting : .reconnecting(attempt: attempt))
+
+            do {
+                try await ClientConnectionHandler.establishConnection(
+                    to: address,
+                    system: system,
+                    onConnected: { [weak self] in
+                        await self?.updateStatus(.connected)
+                    }
+                )
+                backoff.reset()
+                attempt = 0
+            } catch is CancellationError {
+                break
+            } catch {
+                await updateStatus(.failed(error.localizedDescription))
+            }
+
+            if let delay = backoff.next(), delay > 0 {
+                do {
+                    try await Task.sleep(for: .seconds(delay))
+                } catch {
+                    break
+                }
+            }
         }
+
+        await updateStatus(.disconnected)
+    }
+
+    private func updateStatus(_ newStatus: ConnectionStatus) async {
+        currentStatus = newStatus
+        await statusHandler?(newStatus)
     }
 }
 
-/// Nonisolated connection handler to avoid actor isolation issues with NIO bootstrap.
 private enum ClientConnectionHandler {
-    static func establishConnection(to address: ServerAddress, system: TransmissionSystem) async throws {
+    static func establishConnection(
+        to address: ServerAddress,
+        system: TransmissionSystem,
+        onConnected: @escaping @Sendable () async -> Void
+    ) async throws {
         let bootstrap = createBootstrap()
 
         let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
-            upgradePipelineHandler: { channel, _ in
+            upgradePipelineHandler: { channel, upgradeResponse in
                 channel.eventLoop.makeCompletedFuture {
                     let asyncChannel = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(
                         wrappingChannelSynchronously: channel
                     )
-                    return UpgradeResult.websocket(asyncChannel)
+                    let serverNodeID = upgradeResponse.headers.first(name: "X-Server-Node-ID")
+                    return UpgradeResult.websocket(asyncChannel, serverNodeID: serverNodeID)
                 }
             }
         )
@@ -94,12 +133,11 @@ private enum ClientConnectionHandler {
             }
         }
 
-        // Wait for the negotiation handler to complete and get the upgrade result
         let result = try await upgradeResult.get()
 
         switch result {
-        case .websocket(let wsChannel):
-            try await handleWebSocket(wsChannel, system: system)
+        case .websocket(let wsChannel, let serverNodeID):
+            try await handleWebSocket(wsChannel, serverNodeID: serverNodeID, system: system, onConnected: onConnected)
         case .notUpgraded:
             throw TransmissionError.connectionFailed("WebSocket upgrade failed")
         }
@@ -107,27 +145,43 @@ private enum ClientConnectionHandler {
 
     static func handleWebSocket(
         _ channel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame>,
-        system: TransmissionSystem
+        serverNodeID: String?,
+        system: TransmissionSystem,
+        onConnected: @escaping @Sendable () async -> Void
     ) async throws {
         try await channel.executeThenClose { inbound, outbound in
+            let nodeID: NodeIdentity
+            if let serverID = serverNodeID {
+                nodeID = NodeIdentity(id: serverID)
+                system.logger.debug("Connected to server with ID: \(serverID)")
+            } else {
+                nodeID = .server
+                system.logger.debug("Connected to server (no ID provided, using default)")
+            }
+
             let node = RemoteNode(
-                nodeID: .server,
+                nodeID: nodeID,
                 channel: channel,
                 inbound: inbound,
                 outbound: outbound
             )
 
             await system.nodes.register(node)
-            defer {
-                Task { await system.nodes.unregister(.server) }
+            await onConnected()
+
+            do {
+                try await processFrames(
+                    inbound: inbound,
+                    outbound: outbound,
+                    system: system,
+                    node: node
+                )
+            } catch {
+                await system.nodes.unregister(nodeID)
+                throw error
             }
 
-            try await processFrames(
-                inbound: inbound,
-                outbound: outbound,
-                system: system,
-                node: node
-            )
+            await system.nodes.unregister(nodeID)
         }
     }
 
@@ -165,7 +219,7 @@ private enum ClientConnectionHandler {
 
     #if canImport(Network)
     static func createBootstrap() -> NIOTSConnectionBootstrap {
-        NIOTSConnectionBootstrap(group: NIOSingletons.posixEventLoopGroup)
+        NIOTSConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
     }
     #else
     static func createBootstrap() -> ClientBootstrap {
@@ -175,13 +229,14 @@ private enum ClientConnectionHandler {
 }
 
 private enum UpgradeResult: Sendable {
-    case websocket(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>)
+    case websocket(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>, serverNodeID: String?)
     case notUpgraded
 }
 
 extension TransmissionSystem {
     public func connect(to address: ServerAddress, onStatus: (@Sendable (ConnectionStatus) async -> Void)? = nil) async throws {
         let client = ClientManager(system: self)
+        setClientManager(client)
         await client.connect(to: address, onStatus: onStatus)
     }
 

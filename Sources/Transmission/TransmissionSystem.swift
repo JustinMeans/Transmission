@@ -25,6 +25,7 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
     private let lock = NSLock()
     private var actors: [ActorID: any DistributedActor] = [:]
     private var onDemandResolver: ((ActorID) -> (any DistributedActor)?)?
+    private var clientManager: ClientManager?
 
     public let nodes = NodeDirectory()
     public let pendingCalls = PendingCalls()
@@ -111,6 +112,12 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
         }
     }
 
+    func setClientManager(_ client: ClientManager) {
+        withLock {
+            clientManager = client
+        }
+    }
+
     /// Looks up a registered actor by ID without type constraints.
     /// Returns nil if no actor is registered with the given ID.
     public func lookupActor(id: ActorID) -> (any DistributedActor)? {
@@ -142,7 +149,7 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
                     handler: handler
                 )
             } catch {
-                // Error already handled by onThrow
+                logger.debug("Target execution error: \(error)")
             }
 
             let reply = ReplyEnvelope(
@@ -273,7 +280,7 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
                     handler: handler
                 )
             } catch {
-                // Error already handled by onThrow
+                logger.debug("Target execution error: \(error)")
             }
 
             let reply = ReplyEnvelope(
@@ -284,7 +291,7 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
 
             try await node.send(.reply(reply))
         } catch {
-            logger.error("Failed to handle call: \(error)")
+            logger.error("Call handling failed: \(error)")
         }
     }
 

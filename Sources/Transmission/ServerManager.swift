@@ -17,16 +17,25 @@ public actor ServerManager {
         guard !isRunning else { return }
         isRunning = true
 
+        let serverNodeID = system.nodeID.id
+
         let upgrader = NIOTypedWebSocketServerUpgrader<UpgradeResult>(
             shouldUpgrade: { channel, head in
-                channel.eventLoop.makeSucceededFuture(HTTPHeaders())
+                let clientNodeID = head.headers.first(name: "X-Node-ID")
+                var responseHeaders = HTTPHeaders()
+                responseHeaders.add(name: "X-Server-Node-ID", value: serverNodeID)
+                if let nodeID = clientNodeID {
+                    responseHeaders.add(name: "X-Client-Node-ID", value: nodeID)
+                }
+                return channel.eventLoop.makeSucceededFuture(responseHeaders)
             },
-            upgradePipelineHandler: { channel, _ in
+            upgradePipelineHandler: { channel, upgradeResponse in
                 channel.eventLoop.makeCompletedFuture {
                     let asyncChannel = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(
                         wrappingChannelSynchronously: channel
                     )
-                    return UpgradeResult.websocket(asyncChannel)
+                    let clientNodeID = upgradeResponse.headers.first(name: "X-Client-Node-ID")
+                    return UpgradeResult.websocket(asyncChannel, clientNodeID: clientNodeID)
                 }
             }
         )
@@ -52,7 +61,6 @@ public actor ServerManager {
 
         system.logger.info("Server listening on \(address)")
 
-        // Capture system reference for use in task group
         let systemRef = system
 
         try await withThrowingDiscardingTaskGroup { group in
@@ -61,9 +69,10 @@ public actor ServerManager {
                     group.addTask {
                         do {
                             let result = try await connectionResult.get()
-                            if case .websocket(let wsChannel) = result {
+                            if case .websocket(let wsChannel, let clientNodeID) = result {
                                 try await ServerConnectionHandler.handleWebSocket(
                                     channel: wsChannel,
+                                    clientNodeID: clientNodeID,
                                     system: systemRef
                                 )
                             }
@@ -81,16 +90,24 @@ public actor ServerManager {
     }
 }
 
-/// Nonisolated connection handler to avoid actor isolation in task group closures.
 private enum ServerConnectionHandler {
     static func handleWebSocket(
         channel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame>,
+        clientNodeID: String?,
         system: TransmissionSystem
     ) async throws {
         try await channel.executeThenClose { inbound, outbound in
-            let clientID = NodeIdentity.random()
+            let nodeID: NodeIdentity
+            if let clientID = clientNodeID {
+                nodeID = NodeIdentity(id: clientID)
+                system.logger.debug("Client connected with ID: \(clientID)")
+            } else {
+                nodeID = NodeIdentity.random()
+                system.logger.debug("Client connected with random ID: \(nodeID.id)")
+            }
+
             let node = RemoteNode(
-                nodeID: clientID,
+                nodeID: nodeID,
                 channel: channel,
                 inbound: inbound,
                 outbound: outbound
@@ -99,19 +116,21 @@ private enum ServerConnectionHandler {
             await system.nodes.register(node)
             system.metrics.connectionOpened()
 
-            defer {
-                Task {
-                    await system.nodes.unregister(clientID)
-                    system.metrics.connectionClosed()
-                }
+            do {
+                try await processFrames(
+                    inbound: inbound,
+                    outbound: outbound,
+                    system: system,
+                    node: node
+                )
+            } catch {
+                await system.nodes.unregister(nodeID)
+                system.metrics.connectionClosed()
+                throw error
             }
 
-            try await processFrames(
-                inbound: inbound,
-                outbound: outbound,
-                system: system,
-                node: node
-            )
+            await system.nodes.unregister(nodeID)
+            system.metrics.connectionClosed()
         }
     }
 
@@ -150,7 +169,7 @@ private enum ServerConnectionHandler {
 }
 
 private enum UpgradeResult: Sendable {
-    case websocket(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>)
+    case websocket(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>, clientNodeID: String?)
     case notUpgraded
 }
 
