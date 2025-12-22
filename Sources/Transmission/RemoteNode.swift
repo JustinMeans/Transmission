@@ -6,15 +6,21 @@ import Logging
 /// Represents a connection to a remote node in the Transmission network.
 public actor RemoteNode {
     public let nodeID: NodeIdentity
-    let channel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame>
-    let inbound: NIOAsyncChannelInboundStream<WebSocketFrame>
-    let outbound: NIOAsyncChannelOutboundWriter<WebSocketFrame>
+
+    // NIO-based connection (used by clients)
+    private let channel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame>?
+    private let outbound: NIOAsyncChannelOutboundWriter<WebSocketFrame>?
+
+    // Closure-based connection (used by Vapor servers)
+    private let sendClosure: (@Sendable (Data) async throws -> Void)?
+    private let closeClosure: (@Sendable () async -> Void)?
 
     private var userInfo: [String: any Sendable] = [:]
     private var isClosed = false
 
     @TaskLocal public static var current: RemoteNode?
 
+    /// Creates a RemoteNode with NIO async channel (for clients)
     init(
         nodeID: NodeIdentity,
         channel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame>,
@@ -23,8 +29,22 @@ public actor RemoteNode {
     ) {
         self.nodeID = nodeID
         self.channel = channel
-        self.inbound = inbound
         self.outbound = outbound
+        self.sendClosure = nil
+        self.closeClosure = nil
+    }
+
+    /// Creates a RemoteNode with send/close closures (for Vapor servers)
+    public init(
+        nodeID: NodeIdentity,
+        send: @escaping @Sendable (Data) async throws -> Void,
+        close: @escaping @Sendable () async -> Void
+    ) {
+        self.nodeID = nodeID
+        self.channel = nil
+        self.outbound = nil
+        self.sendClosure = send
+        self.closeClosure = close
     }
 
     /// Serialization format for this connection. Defaults to binary for optimal performance.
@@ -37,23 +57,26 @@ public actor RemoteNode {
         }
 
         let data: Data
-        let opcode: WebSocketOpcode
-
         switch serializationFormat {
         case .binary:
             data = envelope.encodeCompact()
-            opcode = .binary
         case .json:
             let encoder = JSONEncoder()
             data = try encoder.encode(envelope)
-            opcode = .text
         }
 
-        var buffer = channel.channel.allocator.buffer(capacity: data.count)
-        buffer.writeBytes(data)
-
-        let frame = WebSocketFrame(fin: true, opcode: opcode, data: buffer)
-        try await outbound.write(frame)
+        // Use closure-based send if available (Vapor), otherwise NIO channel
+        if let sendClosure {
+            try await sendClosure(data)
+        } else if let channel, let outbound {
+            let opcode: WebSocketOpcode = serializationFormat == .binary ? .binary : .text
+            var buffer = channel.channel.allocator.buffer(capacity: data.count)
+            buffer.writeBytes(data)
+            let frame = WebSocketFrame(fin: true, opcode: opcode, data: buffer)
+            try await outbound.write(frame)
+        } else {
+            throw TransmissionError.noConnection
+        }
     }
 
     /// Sends raw data as a binary frame.
@@ -62,18 +85,24 @@ public actor RemoteNode {
             throw TransmissionError.noConnection
         }
 
-        var buffer = channel.channel.allocator.buffer(capacity: data.count)
-        buffer.writeBytes(data)
-
-        let frame = WebSocketFrame(fin: true, opcode: .binary, data: buffer)
-        try await outbound.write(frame)
+        if let sendClosure {
+            try await sendClosure(data)
+        } else if let channel, let outbound {
+            var buffer = channel.channel.allocator.buffer(capacity: data.count)
+            buffer.writeBytes(data)
+            let frame = WebSocketFrame(fin: true, opcode: .binary, data: buffer)
+            try await outbound.write(frame)
+        } else {
+            throw TransmissionError.noConnection
+        }
     }
 
     /// Sends a ping frame.
     public func ping() async throws {
         guard !isClosed else { return }
+        guard let channel, let outbound else { return }
 
-        var buffer = channel.channel.allocator.buffer(capacity: 0)
+        let buffer = channel.channel.allocator.buffer(capacity: 0)
         let frame = WebSocketFrame(fin: true, opcode: .ping, data: buffer)
         try await outbound.write(frame)
     }
@@ -83,14 +112,18 @@ public actor RemoteNode {
         guard !isClosed else { return }
         isClosed = true
 
-        do {
-            var buffer = channel.channel.allocator.buffer(capacity: 2)
-            buffer.writeInteger(UInt16(1000)) // Normal closure
-            let frame = WebSocketFrame(fin: true, opcode: .connectionClose, data: buffer)
-            try await outbound.write(frame)
-            outbound.finish()
-        } catch {
-            // Ignore close errors
+        if let closeClosure {
+            await closeClosure()
+        } else if let channel, let outbound {
+            do {
+                var buffer = channel.channel.allocator.buffer(capacity: 2)
+                buffer.writeInteger(UInt16(1000)) // Normal closure
+                let frame = WebSocketFrame(fin: true, opcode: .connectionClose, data: buffer)
+                try await outbound.write(frame)
+                outbound.finish()
+            } catch {
+                // Ignore close errors
+            }
         }
     }
 

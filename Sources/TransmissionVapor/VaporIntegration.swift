@@ -57,12 +57,24 @@ public actor VaporWebSocketBridge {
     private let ws: WebSocket
     private let nodeID: NodeIdentity
     private let system: TransmissionSystem
+    private let remoteNode: RemoteNode
     private var isClosed = false
 
     init(ws: WebSocket, nodeID: NodeIdentity, system: TransmissionSystem) {
         self.ws = ws
         self.nodeID = nodeID
         self.system = system
+
+        // Create a RemoteNode that sends via Vapor's WebSocket
+        self.remoteNode = RemoteNode(
+            nodeID: nodeID,
+            send: { [ws] data in
+                try await ws.send(raw: data, opcode: .binary)
+            },
+            close: { [ws] in
+                try? await ws.close()
+            }
+        )
     }
 
     /// Handles an incoming WebSocket connection.
@@ -74,6 +86,9 @@ public actor VaporWebSocketBridge {
 
     func run() async {
         let bridge = self
+
+        // Register this client's node so the server can send calls to it
+        await system.nodes.register(remoteNode)
 
         ws.onText { [bridge] _, text in
             await bridge.handleText(text)

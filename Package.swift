@@ -21,7 +21,6 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.5.0"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.100.0"),
-        .package(url: "https://github.com/vapor/jwt.git", from: "5.0.0"),
     ],
     targets: [
         .target(
@@ -45,7 +44,6 @@ let package = Package(
             dependencies: [
                 "Transmission",
                 .product(name: "Vapor", package: "vapor"),
-                .product(name: "JWT", package: "jwt"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
