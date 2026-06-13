@@ -715,3 +715,83 @@ struct WireProtocolBenchmarks {
         }
     }
 }
+
+// MARK: - Varint overflow correctness
+
+@Suite("Varint Overflow Tests")
+struct VarintOverflowTests {
+
+    // A valid 10-byte LEB128 encoding of UInt64.max:
+    // 9 continuation bytes of 0xFF followed by 0x01.
+    // The 10th byte has value 1 in bits [0..6] at shift=63, which is exactly
+    // the high bit of UInt64 — this must decode successfully.
+    @Test("UInt64.max decodes without error")
+    func uint64MaxDecodes() throws {
+        // 10 bytes: nine 0xFF (continuation) + one 0x01 (terminal)
+        let bytes: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]
+        var decoder = CompactDecoder(Data(bytes))
+        let value = try decoder.readVarint()
+        #expect(value == UInt64.max)
+    }
+
+    // A malformed 10-byte LEB128 where the final byte encodes value 2 at
+    // shift=63. That would require bit 64 to be set — impossible in UInt64.
+    // Before the fix, this either trapped (debug) or silently truncated
+    // (release). After the fix, it must throw decodingFailed.
+    @Test("10-byte varint with final-byte value > 1 throws")
+    func tenByteVarintFinalByteOverflows() {
+        // 9 continuation bytes of 0xFF followed by 0x02 (value=2, no cont. bit)
+        let bytes: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02]
+        var decoder = CompactDecoder(Data(bytes))
+        #expect(throws: (any Error).self) {
+            _ = try decoder.readVarint()
+        }
+    }
+
+    // Same shape but with value=0x7F in the final byte — even larger overflow.
+    @Test("10-byte varint with final-byte value 0x7F throws")
+    func tenByteVarintFinalByteMax() {
+        let bytes: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]
+        var decoder = CompactDecoder(Data(bytes))
+        #expect(throws: (any Error).self) {
+            _ = try decoder.readVarint()
+        }
+    }
+
+    // An 11-byte sequence (extra continuation byte after 10 bytes) must also
+    // throw — this is the pre-existing overflow guard, confirmed still works.
+    @Test("11-byte varint throws overflow")
+    func elevenByteVarintThrows() {
+        // 10 continuation bytes of 0xFF followed by 0x01 (would be 11 total)
+        let bytes: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]
+        var decoder = CompactDecoder(Data(bytes))
+        #expect(throws: (any Error).self) {
+            _ = try decoder.readVarint()
+        }
+    }
+
+    // Round-trip boundary: values that straddle the 9-byte / 10-byte boundary.
+    @Test("9-byte varint boundary values round-trip correctly")
+    func nineByteVarintBoundary() throws {
+        // Largest value that fits in 9 LEB128 bytes: (1 << 63) - 1 = Int64.max
+        let boundary: UInt64 = UInt64(Int64.max)
+        var encoder = CompactEncoder()
+        encoder.writeVarint(boundary)
+        #expect(encoder.data.count == 9)
+
+        var decoder = CompactDecoder(encoder.data)
+        let decoded = try decoder.readVarint()
+        #expect(decoded == boundary)
+    }
+
+    // Confirm that the fix does not regress reading a 10-byte value of exactly
+    // UInt64.max - 1 (0xFFFFFFFFFFFFFFFE): still a valid 10-byte encoding.
+    @Test("UInt64.max - 1 decodes without error")
+    func uint64MaxMinus1Decodes() throws {
+        var encoder = CompactEncoder()
+        encoder.writeVarint(UInt64.max - 1)
+        var decoder = CompactDecoder(encoder.data)
+        let decoded = try decoder.readVarint()
+        #expect(decoded == UInt64.max - 1)
+    }
+}

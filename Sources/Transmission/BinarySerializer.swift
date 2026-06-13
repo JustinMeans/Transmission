@@ -92,6 +92,12 @@ public struct CompactDecoder: Sendable {
             }
             let byte = buffer[offset]
             offset += 1
+            // At shift=63 only bit 63 is valid for a UInt64. Reject any 7-bit
+            // value > 1 at this position — it would silently overflow (or trap
+            // in a debug build) rather than being detected as out-of-range.
+            if shift == 63, byte & 0x7F > 1 {
+                throw TransmissionError.decodingFailed("Varint overflow: value exceeds UInt64.max")
+            }
             result |= UInt64(byte & 0x7F) << shift
             if byte & 0x80 == 0 {
                 break
