@@ -61,9 +61,11 @@ public actor ResilientConnection {
 
             do {
                 try await action()
+                // action() returned normally, meaning the connection was established
+                // and has since closed cleanly. Reset backoff for the next attempt
+                // but do NOT flash .connected here — the connection is already gone.
                 backoff.reset()
                 attempt = 0
-                updateStatus(.connected)
             } catch is CancellationError {
                 break
             } catch {

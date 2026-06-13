@@ -136,6 +136,41 @@ struct ResilientConnectionTests {
         #expect(status == .disconnected)
     }
 
+    @Test("Clean disconnect does not flash connected status")
+    func cleanDisconnectDoesNotFlashConnected() async throws {
+        // Regression test: after action() returns without error (clean disconnect),
+        // the status must never transition to .connected — the connection is already
+        // gone at that point. Before the fix, updateStatus(.connected) was called
+        // unconditionally after action() returned, causing a spurious connected flash
+        // that misled callers monitoring connection state.
+        let statusUpdates = AtomicArray<ConnectionStatus>()
+
+        let connection = ResilientConnection(
+            backoff: ExponentialBackoff(initial: 0, minimum: 0.01, maximum: 0.01, jitter: 0),
+            onStatusChange: { status in
+                statusUpdates.append(status)
+            }
+        ) {
+            // Simulate a connection that establishes and then closes cleanly
+            // (returns without throwing) after a brief moment.
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        await connection.start()
+        try await Task.sleep(for: .milliseconds(200))
+        await connection.stop()
+
+        let updates = statusUpdates.values
+        // There must be no .connected transition — that status can only come from
+        // an explicit onConnected callback (as ClientManager does). ResilientConnection
+        // without an onConnected hook should never emit .connected on its own.
+        let connectedUpdates = updates.filter {
+            if case .connected = $0 { return true }
+            return false
+        }
+        #expect(connectedUpdates.isEmpty, "Status must not flash .connected after a clean disconnect; got: \(updates)")
+    }
+
     @Test("Failed connection triggers reconnect")
     func failedConnectionReconnects() async throws {
         let attempts = AtomicCounter(0)
