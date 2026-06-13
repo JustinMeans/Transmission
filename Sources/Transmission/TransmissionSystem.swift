@@ -245,6 +245,17 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
         TransmissionEncoder(system: self)
     }
 
+    // MARK: - Node Lifecycle
+
+    /// Unregisters a node and immediately cancels any pending calls that were
+    /// dispatched to it. Callers should use this instead of calling
+    /// `nodes.unregister` directly so that in-flight calls fail fast rather
+    /// than waiting for their full timeout period.
+    public func nodeDidDisconnect(_ nodeID: NodeIdentity) async {
+        await nodes.unregister(nodeID)
+        await pendingCalls.cancelAll(for: nodeID)
+    }
+
     // MARK: - Message Handling
 
     /// Decodes and delivers an incoming message from a remote node.

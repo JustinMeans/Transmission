@@ -155,7 +155,7 @@ public actor VaporWebSocketBridge {
         guard !isClosed else { return }
         isClosed = true
         try? await ws.close()
-        await system.nodes.unregister(nodeID)
+        await system.nodeDidDisconnect(nodeID)
     }
 
     /// Sends a wire envelope through the WebSocket.

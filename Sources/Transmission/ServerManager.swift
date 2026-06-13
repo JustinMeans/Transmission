@@ -124,12 +124,12 @@ private enum ServerConnectionHandler {
                     node: node
                 )
             } catch {
-                await system.nodes.unregister(nodeID)
+                await system.nodeDidDisconnect(nodeID)
                 system.metrics.connectionClosed()
                 throw error
             }
 
-            await system.nodes.unregister(nodeID)
+            await system.nodeDidDisconnect(nodeID)
             system.metrics.connectionClosed()
         }
     }

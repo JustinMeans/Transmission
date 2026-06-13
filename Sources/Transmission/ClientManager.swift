@@ -177,11 +177,11 @@ private enum ClientConnectionHandler {
                     node: node
                 )
             } catch {
-                await system.nodes.unregister(nodeID)
+                await system.nodeDidDisconnect(nodeID)
                 throw error
             }
 
-            await system.nodes.unregister(nodeID)
+            await system.nodeDidDisconnect(nodeID)
         }
     }
 

@@ -4,6 +4,9 @@ import Foundation
 public actor PendingCalls {
     private var continuations: [CallID: CheckedContinuation<Data, any Error>] = [:]
     private var timeoutTasks: [CallID: Task<Void, Never>] = [:]
+    /// Maps each in-flight call to the node it was dispatched to, enabling
+    /// per-node cancellation when a connection drops.
+    private var callNodeIDs: [CallID: NodeIdentity] = [:]
 
     public init() {}
 
@@ -11,7 +14,7 @@ public actor PendingCalls {
     public func send(envelope: CallEnvelope, via node: RemoteNode, timeout: Duration = .seconds(30)) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             Task {
-                await self.register(callID: envelope.callID, continuation: continuation, timeout: timeout)
+                await self.register(callID: envelope.callID, nodeID: node.nodeID, continuation: continuation, timeout: timeout)
 
                 do {
                     try await node.send(.call(envelope))
@@ -30,26 +33,35 @@ public actor PendingCalls {
 
         timeoutTasks[reply.callID]?.cancel()
         timeoutTasks.removeValue(forKey: reply.callID)
+        callNodeIDs.removeValue(forKey: reply.callID)
 
         continuation.resume(returning: reply.value)
     }
 
-    /// Cancels all pending calls for a node.
+    /// Cancels only the pending calls that were dispatched to the given node.
+    /// Calls to other nodes are left untouched.
     public func cancelAll(for nodeID: NodeIdentity) {
-        for (callID, continuation) in continuations {
-            continuation.resume(throwing: TransmissionError.noConnection)
-            timeoutTasks[callID]?.cancel()
+        let targetCallIDs = callNodeIDs.compactMap { (callID, nid) -> CallID? in
+            nid == nodeID ? callID : nil
         }
-        continuations.removeAll()
-        timeoutTasks.removeAll()
+        for callID in targetCallIDs {
+            if let continuation = continuations.removeValue(forKey: callID) {
+                continuation.resume(throwing: TransmissionError.noConnection)
+            }
+            timeoutTasks[callID]?.cancel()
+            timeoutTasks.removeValue(forKey: callID)
+            callNodeIDs.removeValue(forKey: callID)
+        }
     }
 
     private func register(
         callID: CallID,
+        nodeID: NodeIdentity,
         continuation: CheckedContinuation<Data, any Error>,
         timeout: Duration
     ) {
         continuations[callID] = continuation
+        callNodeIDs[callID] = nodeID
 
         timeoutTasks[callID] = Task {
             do {
@@ -66,6 +78,7 @@ public actor PendingCalls {
             return
         }
         timeoutTasks.removeValue(forKey: callID)
+        callNodeIDs.removeValue(forKey: callID)
         continuation.resume(throwing: TransmissionError.callTimeout(callID))
     }
 
@@ -75,6 +88,7 @@ public actor PendingCalls {
         }
         timeoutTasks[callID]?.cancel()
         timeoutTasks.removeValue(forKey: callID)
+        callNodeIDs.removeValue(forKey: callID)
         continuation.resume(throwing: error)
     }
 }
