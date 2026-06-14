@@ -117,8 +117,14 @@ public struct CompactDecoder: Sendable {
     }
 
     public mutating func readBytes() throws -> Data {
-        let length = Int(try readVarint())
-        guard offset + length <= buffer.count else {
+        let rawLength = try readVarint()
+        guard rawLength <= UInt64(Int.max) else {
+            throw TransmissionError.decodingFailed("Data length varint overflows Int: \(rawLength)")
+        }
+        let length = Int(rawLength)
+        // Compare as `length <= buffer.count - offset` to avoid integer overflow
+        // when `length` is large (e.g. Int.max) and `offset` is non-zero.
+        guard length <= buffer.count - offset else {
             throw TransmissionError.decodingFailed("Insufficient bytes for data")
         }
         let data = Data(buffer[offset..<(offset + length)])
@@ -228,14 +234,22 @@ extension WireEnvelope {
             let priorityRaw = try decoder.readUInt8()
             let priority = MessagePriority(rawValue: Int(priorityRaw)) ?? .normal
 
-            let subsCount = Int(try decoder.readVarint())
+            let rawSubsCount = try decoder.readVarint()
+            guard rawSubsCount <= UInt64(Int.max) else {
+                throw TransmissionError.decodingFailed("Generic substitution count overflows Int: \(rawSubsCount)")
+            }
+            let subsCount = Int(rawSubsCount)
             var genericSubs: [String] = []
             genericSubs.reserveCapacity(subsCount)
             for _ in 0..<subsCount {
                 genericSubs.append(try decoder.readString())
             }
 
-            let argsCount = Int(try decoder.readVarint())
+            let rawArgsCount = try decoder.readVarint()
+            guard rawArgsCount <= UInt64(Int.max) else {
+                throw TransmissionError.decodingFailed("Argument count overflows Int: \(rawArgsCount)")
+            }
+            let argsCount = Int(rawArgsCount)
             var args: [Data] = []
             args.reserveCapacity(argsCount)
             for _ in 0..<argsCount {

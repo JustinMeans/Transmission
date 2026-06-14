@@ -795,3 +795,81 @@ struct VarintOverflowTests {
         #expect(decoded == UInt64.max - 1)
     }
 }
+
+// MARK: - readBytes length overflow (Int narrowing conversion)
+
+/// `readBytes()` converts the varint-encoded length to Int with `Int(try readVarint())`.
+/// When the varint encodes a value > Int.max (e.g. Int.max+1 = 0x8000_0000_0000_0000),
+/// Swift's checked Int(UInt64) initializer traps rather than throwing, which would crash
+/// the process on a malformed or adversarial payload.
+///
+/// The fix replaces the bare `Int(...)` with a bounds check that throws
+/// `TransmissionError.decodingFailed` when the encoded length exceeds Int.max.
+///
+/// The same issue exists for `subsCount` and `argsCount` in `decodeCompact`, which are
+/// also fixed by the same guarded conversion.
+@Suite("readBytes length overflow tests")
+struct ReadBytesLengthOverflowTests {
+
+    // LEB128 encoding of (Int.max + 1) = 0x8000_0000_0000_0000.
+    // Nine continuation bytes of 0x80 followed by terminal byte 0x01.
+    // readVarint() accepts this (it fits in UInt64), but Int(that value) traps
+    // because 0x8000_0000_0000_0000 > Int.max.
+    private let lengthAboveIntMax: [UInt8] = [
+        0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01
+    ]
+
+    @Test("readBytes throws when varint-encoded length exceeds Int.max")
+    func readBytesLengthExceedsIntMax() {
+        // Build a payload: the large-length varint followed by zero payload bytes
+        // (the bounds check fires before any byte access).
+        let bytes = lengthAboveIntMax
+        // No payload bytes follow — the length check must fire first.
+        var decoder = CompactDecoder(Data(bytes))
+        #expect(throws: (any Error).self,
+                "readBytes must throw decodingFailed when length > Int.max, not trap") {
+            _ = try decoder.readBytes()
+        }
+    }
+
+    @Test("decodeCompact throws when args count varint exceeds Int.max")
+    func decodeCompactArgsCountExceedsIntMax() {
+        // Craft a minimal .call frame:
+        // type byte (0x00) + 16-byte UUID + actor ID + optional node ID (absent) +
+        // target string + priority byte + genericSubs count (0) + args count as huge varint.
+        var encoder = CompactEncoder()
+        encoder.writeUInt8(0)                         // envelope type: call
+        encoder.writeUUID(UUID())                     // call ID
+        encoder.writeString("actor")                  // recipient actor ID
+        encoder.writeUInt8(0)                         // no node ID
+        encoder.writeString("method()")               // target
+        encoder.writeUInt8(2)                         // priority: normal (rawValue=2)
+        encoder.writeVarint(0)                        // genericSubs count = 0
+        // Write (Int.max + 1) as the args count to trigger the overflow.
+        var raw = encoder.data
+        // Append the large varint manually (writeVarint only accepts valid UInt64,
+        // but we need the specific 10-byte sequence for Int.max+1).
+        raw.append(contentsOf: lengthAboveIntMax)
+        #expect(throws: (any Error).self,
+                "decodeCompact must throw when args count varint > Int.max") {
+            _ = try WireEnvelope.decodeCompact(from: raw)
+        }
+    }
+
+    @Test("readBytes works correctly for length equal to Int.max would be impossible in practice; verify large-but-valid length throws insufficient-bytes")
+    func readBytesLargeButValidLengthThrowsInsufficientBytes() throws {
+        // Encode a valid (but huge) length that fits in Int: UInt64(Int.max).
+        // The buffer won't have that many bytes, so the bounds check must throw
+        // "Insufficient bytes" — NOT trap. This confirms the safe path before the
+        // insufficiency check is also hit correctly.
+        var encoder = CompactEncoder()
+        encoder.writeVarint(UInt64(Int.max))
+        // No payload — the bounds check "offset + length <= buffer.count" fires.
+        var decoder = CompactDecoder(encoder.data)
+        // Must throw decodingFailed("Insufficient bytes for data"), not trap.
+        #expect(throws: (any Error).self,
+                "readBytes with length > available data must throw, not trap") {
+            _ = try decoder.readBytes()
+        }
+    }
+}
