@@ -4,7 +4,10 @@ import Foundation
 public actor NodeDirectory {
     private enum NodeState {
         case connected(RemoteNode)
-        case pending([CheckedContinuation<RemoteNode, any Error>])
+        /// Each pending waiter is stored with its unique nonce so the
+        /// cancellation handler can remove exactly the right continuation
+        /// even when multiple callers are waiting for the same node.
+        case pending([(nonce: UUID, continuation: CheckedContinuation<RemoteNode, any Error>)])
     }
 
     private var nodes: [NodeIdentity: NodeState] = [:]
@@ -16,9 +19,9 @@ public actor NodeDirectory {
     public func register(_ node: RemoteNode) {
         let nodeID = node.nodeID
 
-        if case .pending(let continuations) = nodes[nodeID] {
-            for continuation in continuations {
-                continuation.resume(returning: node)
+        if case .pending(let waiters) = nodes[nodeID] {
+            for waiter in waiters {
+                waiter.continuation.resume(returning: node)
             }
         }
 
@@ -31,9 +34,9 @@ public actor NodeDirectory {
 
     /// Unregisters a node.
     public func unregister(_ nodeID: NodeIdentity) {
-        if case .pending(let continuations) = nodes[nodeID] {
-            for continuation in continuations {
-                continuation.resume(throwing: TransmissionError.noConnection)
+        if case .pending(let waiters) = nodes[nodeID] {
+            for waiter in waiters {
+                waiter.continuation.resume(throwing: TransmissionError.noConnection)
             }
         }
         nodes.removeValue(forKey: nodeID)
@@ -129,45 +132,32 @@ public actor NodeDirectory {
         switch nodes[nodeID] {
         case .connected(let node):
             continuation.resume(returning: node)
-        case .pending(var continuations):
-            continuations.append(continuation)
-            nodes[nodeID] = .pending(continuations)
+        case .pending(var waiters):
+            waiters.append((nonce: nonce, continuation: continuation))
+            nodes[nodeID] = .pending(waiters)
         case nil:
-            nodes[nodeID] = .pending([continuation])
+            nodes[nodeID] = .pending([(nonce: nonce, continuation: continuation)])
         }
     }
 
     /// Removes and resumes with CancellationError the continuation identified by
-    /// `nonce`.  Because multiple callers may be waiting for the same `nodeID` we
-    /// keep all continuations in an array; we cannot cheaply identify one by
-    /// nonce without extra bookkeeping.  The simplest correct approach: remove
-    /// ALL pending continuations for the node and re-enqueue the survivors.
-    ///
-    /// In practice the common case is a single waiter, so the inner loop is
-    /// cheap.  For the rare multi-waiter case we pop every pending continuation
-    /// and re-register each one that is not ours (it will be re-added to the
-    /// `.pending` array as if freshly registered).
+    /// `nonce`.  Because each waiter is stored as a `(nonce, continuation)` pair,
+    /// the correct entry can be found by identity even when multiple callers are
+    /// waiting for the same `nodeID`.
     private func removePendingContinuation(
         nonce: UUID,
         nodeID: NodeIdentity
     ) {
-        // We cannot match by nonce without storing it, so we adopt a tracked
-        // approach: store (UUID, continuation) pairs in the pending state.
-        // However, changing NodeState now would be a bigger refactor.  Instead
-        // we use a simpler invariant: cancel the first pending continuation for
-        // this node.  Because each call to `waitForConnection` appends one
-        // continuation and each `onCancel` fires exactly once per call, cancelling
-        // the first one is correct for the single-waiter case and produces at-most-
-        // one spurious wakeup (immediately re-suspended) in the multi-waiter case.
-        guard case .pending(var continuations) = nodes[nodeID], !continuations.isEmpty else {
-            return
-        }
-        let cancelled = continuations.removeFirst()
-        if continuations.isEmpty {
+        guard case .pending(var waiters) = nodes[nodeID] else { return }
+
+        guard let index = waiters.firstIndex(where: { $0.nonce == nonce }) else { return }
+
+        let cancelled = waiters.remove(at: index)
+        if waiters.isEmpty {
             nodes.removeValue(forKey: nodeID)
         } else {
-            nodes[nodeID] = .pending(continuations)
+            nodes[nodeID] = .pending(waiters)
         }
-        cancelled.resume(throwing: CancellationError())
+        cancelled.continuation.resume(throwing: CancellationError())
     }
 }

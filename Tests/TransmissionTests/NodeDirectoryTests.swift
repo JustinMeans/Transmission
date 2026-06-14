@@ -159,4 +159,69 @@ struct NodeDirectoryTests {
         let resolvedID = await resolved.nodeID
         #expect(resolvedID == NodeIdentity(id: "fast-server"))
     }
+
+    // MARK: - Multi-waiter cancellation correctness
+
+    /// Regression test for the bug where `removePendingContinuation` cancelled the
+    /// FIRST pending continuation regardless of nonce, so when two callers waited
+    /// for the same node and the SECOND one timed out, the FIRST one (which still
+    /// had time remaining) was wrongly cancelled instead.
+    ///
+    /// With the fix, each pending waiter is stored as a (nonce, continuation) pair
+    /// so the cancellation handler removes exactly the timed-out entry by identity.
+    @Test("Only the timed-out waiter is cancelled when multiple waiters share a node")
+    func multiWaiterCancellationCancelsOnlyTimedOutEntry() async throws {
+        let dir = NodeDirectory()
+        let nodeID = NodeIdentity(id: "shared-node")
+
+        // Waiter A: long timeout — must NOT be cancelled.
+        let waiterA = Task<RemoteNode?, Never> {
+            do {
+                return try await dir.node(for: nodeID, timeout: .seconds(10))
+            } catch {
+                // Any error (including spurious CancellationError from the bug)
+                // surfaces as nil so the #expect below can catch it.
+                return nil
+            }
+        }
+
+        // Give waiter A time to register its continuation first.
+        try await Task.sleep(for: .milliseconds(30))
+
+        // Waiter B: very short timeout — must time out with connectionTimeout.
+        let waiterBError: (any Error)? = await {
+            do {
+                _ = try await dir.node(for: nodeID, timeout: .milliseconds(50))
+                return nil
+            } catch {
+                return error
+            }
+        }()
+
+        // Waiter B must have thrown connectionTimeout.
+        if let te = waiterBError as? TransmissionError, case .connectionTimeout = te {
+            // correct
+        } else {
+            Issue.record("Waiter B must throw TransmissionError.connectionTimeout, got \(String(describing: waiterBError))")
+        }
+
+        // Allow any async cleanup (onCancel Task hop) to settle.
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Now register the node. Waiter A must be unblocked.
+        let stub = makeStubNode(id: "shared-node")
+        await dir.register(stub)
+
+        let resolved = await waiterA.value
+        #expect(resolved != nil,
+            "Waiter A must not have been cancelled: its timeout had not expired")
+
+        if let node = resolved {
+            let resolvedID = await node.nodeID
+            #expect(resolvedID == nodeID,
+                "Waiter A must resolve to the registered node")
+        }
+
+        waiterA.cancel()
+    }
 }
