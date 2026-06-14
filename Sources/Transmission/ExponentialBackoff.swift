@@ -39,7 +39,11 @@ public struct ExponentialBackoff: Sendable, Sequence, IteratorProtocol {
         let jitterRange = value * jitter
         let randomJitter = Double.random(in: -jitterRange...jitterRange)
 
-        return Swift.max(0, value + randomJitter)
+        // Clamp to [0, maximum]: jitter is applied after the maximum clamp on
+        // `current`, so without this clamp the returned delay can exceed `maximum`
+        // by up to `maximum * jitter` seconds — breaking the contract of the
+        // parameter (e.g. standard backoff can return up to 37.5 s instead of 30 s).
+        return Swift.min(maximum, Swift.max(0, value + randomJitter))
     }
 
     public mutating func reset() {

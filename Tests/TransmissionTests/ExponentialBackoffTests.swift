@@ -96,4 +96,29 @@ struct ExponentialBackoffTests {
 
         #expect(count == 11)
     }
+
+    /// Jitter must not push the returned delay above `maximum`.
+    ///
+    /// Before the fix, `next()` returned `max(0, value + randomJitter)` without an
+    /// upper clamp. At saturation (`current == maximum`), `jitterRange = maximum * jitter`,
+    /// so the return value could reach `maximum + maximum * jitter` — e.g. 37.5 s
+    /// instead of the declared 30 s cap. This test forces the backoff to saturation
+    /// and runs 10 000 samples to confirm no delay exceeds `maximum`.
+    @Test("Jitter never pushes delay above maximum")
+    func jitterDoesNotExceedMaximum() {
+        // Use a high jitter and a low maximum so any overshoot is easily detected.
+        let cap = 10.0
+        var backoff = ExponentialBackoff(
+            initial: cap,       // start already at cap so every call is at saturation
+            minimum: 1.0,
+            maximum: cap,
+            multiplier: 2.0,
+            jitter: 0.5         // ±50 % jitter — would add up to 5 s over cap before fix
+        )
+
+        for _ in 0..<10_000 {
+            let delay = backoff.next()!
+            #expect(delay <= cap, "delay \(delay) exceeded maximum \(cap)")
+        }
+    }
 }
