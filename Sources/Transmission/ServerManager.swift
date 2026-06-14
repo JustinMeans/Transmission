@@ -140,19 +140,19 @@ private enum ServerConnectionHandler {
         system: TransmissionSystem,
         node: RemoteNode
     ) async throws {
-        var buffer = Data()
+        var accumulator = FrameAccumulator()
 
         for try await frame in inbound {
             switch frame.opcode {
             case .text, .binary:
-                var data = frame.data
-                if let bytes = data.readBytes(length: data.readableBytes) {
-                    buffer.append(contentsOf: bytes)
-                    system.metrics.recordMessageReceived(bytes: bytes.count)
+                if let message = accumulator.feed(frame) {
+                    system.metrics.recordMessageReceived(bytes: message.count)
+                    await system.decodeAndDeliver(data: message, from: node)
                 }
-                if frame.fin {
-                    await system.decodeAndDeliver(data: buffer, from: node)
-                    buffer = Data()
+            case .continuation:
+                if let message = accumulator.feed(frame) {
+                    system.metrics.recordMessageReceived(bytes: message.count)
+                    await system.decodeAndDeliver(data: message, from: node)
                 }
             case .ping:
                 let pong = WebSocketFrame(fin: true, opcode: .pong, data: frame.data)
@@ -165,6 +165,38 @@ private enum ServerConnectionHandler {
                 break
             }
         }
+    }
+}
+
+/// Reassembles a WebSocket message from one or more frames.
+///
+/// WebSocket messages may be split across multiple frames: the first frame carries
+/// opcode `.binary` or `.text` with `fin == false`, intermediate frames carry
+/// opcode `.continuation` with `fin == false`, and the last fragment carries
+/// opcode `.continuation` with `fin == true`. Callers must feed every data frame
+/// (including continuation frames) into `feed(_:)` and act on the returned `Data`
+/// when a complete message has been assembled.
+///
+/// Previously `processFrames` only matched `.binary` and `.text` opcodes, silently
+/// discarding any `.continuation` frames via `default: break`. This caused:
+/// - Fragmented message data to be silently dropped.
+/// - The partial buffer from the first fragment to be flushed with the NEXT unrelated
+///   message, corrupting every subsequent delivery.
+struct FrameAccumulator {
+    private var buffer = Data()
+
+    /// Feed one inbound frame. Returns the assembled message data when the final
+    /// fragment (or a standalone non-fragmented frame) has been received;
+    /// returns nil when more frames are still needed to complete the message.
+    mutating func feed(_ frame: WebSocketFrame) -> Data? {
+        var frameData = frame.data
+        if let bytes = frameData.readBytes(length: frameData.readableBytes) {
+            buffer.append(contentsOf: bytes)
+        }
+        guard frame.fin else { return nil }
+        let message = buffer
+        buffer = Data()
+        return message
     }
 }
 

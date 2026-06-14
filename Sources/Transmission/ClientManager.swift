@@ -191,18 +191,17 @@ private enum ClientConnectionHandler {
         system: TransmissionSystem,
         node: RemoteNode
     ) async throws {
-        var buffer = Data()
+        var accumulator = FrameAccumulator()
 
         for try await frame in inbound {
             switch frame.opcode {
             case .text, .binary:
-                var data = frame.data
-                if let bytes = data.readBytes(length: data.readableBytes) {
-                    buffer.append(contentsOf: bytes)
+                if let message = accumulator.feed(frame) {
+                    await system.decodeAndDeliver(data: message, from: node)
                 }
-                if frame.fin {
-                    await system.decodeAndDeliver(data: buffer, from: node)
-                    buffer = Data()
+            case .continuation:
+                if let message = accumulator.feed(frame) {
+                    await system.decodeAndDeliver(data: message, from: node)
                 }
             case .ping:
                 let pong = WebSocketFrame(fin: true, opcode: .pong, data: frame.data)
