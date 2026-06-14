@@ -194,4 +194,67 @@ struct ResilientConnectionTests {
 
         #expect(attempts.value >= 3)
     }
+
+    /// Regression test: stop() must reset backoff so that the next start()
+    /// begins with the initial zero delay, not the accumulated delay from the
+    /// previous session.
+    ///
+    /// Before the fix, stop() left backoff.current at its accumulated value
+    /// (e.g. 5 s after a long session). The next start() would then sleep for
+    /// ~5 s before the first reconnect attempt, violating the contract that a
+    /// fresh start always connects immediately.
+    ///
+    /// The test drives the backoff to its maximum (large delay) via repeated
+    /// failures in the first session, then stops and starts a second session.
+    /// If backoff was NOT reset the second session's first retry delay would
+    /// be the accumulated maximum (0.2 s in this test) and the action would
+    /// not be called within 50 ms. With the fix the second session starts
+    /// immediately and the action is called within 50 ms.
+    @Test("stop() resets backoff so next start() connects immediately")
+    func stopResetsBackoffForNextStart() async throws {
+        // Use a very small maximum so the backoff saturates quickly.
+        // jitter=0 makes the timing deterministic.
+        let backoff = ExponentialBackoff(
+            initial: 0,
+            minimum: 0.05,
+            maximum: 0.2,
+            multiplier: 2.0,
+            jitter: 0
+        )
+
+        let firstSessionAttempts = AtomicCounter(0)
+        let secondSessionAttempts = AtomicCounter(0)
+        let useFirstCounter = AtomicBool(true)
+
+        let connection = ResilientConnection(backoff: backoff) {
+            if useFirstCounter.value {
+                firstSessionAttempts.increment()
+            } else {
+                secondSessionAttempts.increment()
+            }
+            throw TransmissionError.connectionFailed("test")
+        }
+
+        // First session: let the backoff saturate to its maximum.
+        await connection.start()
+        // 4 failures at 0, 0.05, 0.1, 0.2 s intervals = ~0.35 s total; wait 0.5 s
+        try await Task.sleep(for: .milliseconds(500))
+        await connection.stop()   // fix: resets backoff to 0
+
+        // Switch to the second counter and start a new session.
+        useFirstCounter.value = false
+        await connection.start()
+
+        // If backoff was reset, the action is called immediately (no sleep).
+        // Give it 50 ms — well within the first zero-delay attempt.
+        // If backoff was NOT reset the next delay would be 0.2 s and the
+        // action would NOT have been called within 50 ms.
+        try await Task.sleep(for: .milliseconds(50))
+        await connection.stop()
+
+        #expect(
+            secondSessionAttempts.value >= 1,
+            "Second session must attempt at least once within 50 ms — backoff must be reset on stop()"
+        )
+    }
 }

@@ -40,10 +40,13 @@ public actor ResilientConnection {
         }
     }
 
-    /// Stops the connection.
+    /// Stops the connection and resets backoff so that the next `start()` call
+    /// begins with the initial zero delay rather than inheriting accumulated
+    /// backoff state from the previous session.
     public func stop() {
         task?.cancel()
         task = nil
+        backoff.reset()
         updateStatus(.disconnected)
     }
 
