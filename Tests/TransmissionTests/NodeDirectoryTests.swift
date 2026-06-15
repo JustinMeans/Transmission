@@ -224,4 +224,93 @@ struct NodeDirectoryTests {
 
         waiterA.cancel()
     }
+
+    // MARK: - defaultNode happy path
+
+    @Test("defaultNode returns the single registered node")
+    func defaultNodeReturnsSingleRegisteredNode() async throws {
+        let dir = NodeDirectory()
+        let stub = makeStubNode(id: "solo")
+        await dir.register(stub)
+
+        let resolved = try await dir.defaultNode(timeout: .seconds(1))
+        let resolvedID = await resolved.nodeID
+        #expect(resolvedID == NodeIdentity(id: "solo"))
+    }
+
+    @Test("defaultNode throws noConnection when directory is empty")
+    func defaultNodeThrowsNoConnectionWhenEmpty() async {
+        let dir = NodeDirectory()
+        do {
+            _ = try await dir.defaultNode(timeout: .seconds(1))
+            Issue.record("Expected noConnection but call succeeded")
+        } catch TransmissionError.noConnection {
+            // correct
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("defaultNode throws noConnection after the only node is unregistered")
+    func defaultNodeThrowsAfterOnlyNodeUnregisters() async {
+        let dir = NodeDirectory()
+        let stub = makeStubNode(id: "ephemeral")
+        await dir.register(stub)
+        await dir.unregister(NodeIdentity(id: "ephemeral"))
+
+        do {
+            _ = try await dir.defaultNode(timeout: .milliseconds(50))
+            Issue.record("Expected noConnection but call succeeded")
+        } catch TransmissionError.noConnection {
+            // correct — _defaultNode must be nil after the only node unregisters
+        } catch TransmissionError.connectionTimeout {
+            Issue.record("Got connectionTimeout; _defaultNode was not cleared by unregister")
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    // MARK: - connectedNodes
+
+    @Test("connectedNodes is empty when directory is empty")
+    func connectedNodesEmptyWhenDirectoryEmpty() async {
+        let dir = NodeDirectory()
+        let nodes = await dir.connectedNodes
+        #expect(nodes.isEmpty)
+    }
+
+    @Test("connectedNodes returns all registered nodes")
+    func connectedNodesReturnsAllRegistered() async {
+        let dir = NodeDirectory()
+        await dir.register(makeStubNode(id: "alpha"))
+        await dir.register(makeStubNode(id: "beta"))
+        await dir.register(makeStubNode(id: "gamma"))
+
+        let nodes = await dir.connectedNodes
+        let ids = Set(await withTaskGroup(of: NodeIdentity.self) { group in
+            for node in nodes {
+                group.addTask { await node.nodeID }
+            }
+            var result: [NodeIdentity] = []
+            for await id in group { result.append(id) }
+            return result
+        })
+        #expect(ids.count == 3)
+        #expect(ids.contains(NodeIdentity(id: "alpha")))
+        #expect(ids.contains(NodeIdentity(id: "beta")))
+        #expect(ids.contains(NodeIdentity(id: "gamma")))
+    }
+
+    @Test("connectedNodes excludes unregistered nodes")
+    func connectedNodesExcludesUnregistered() async {
+        let dir = NodeDirectory()
+        await dir.register(makeStubNode(id: "keep"))
+        await dir.register(makeStubNode(id: "remove"))
+        await dir.unregister(NodeIdentity(id: "remove"))
+
+        let nodes = await dir.connectedNodes
+        #expect(nodes.count == 1)
+        let id = await nodes.first?.nodeID
+        #expect(id == NodeIdentity(id: "keep"))
+    }
 }
