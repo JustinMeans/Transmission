@@ -34,7 +34,13 @@ public final class TransmissionMetrics: Sendable {
     }
 
     func recordCallDuration(_ duration: Duration, target: String) {
-        callDuration.recordNanoseconds(Int64(duration.components.attoseconds / 1_000_000_000))
+        let c = duration.components
+        // Combine whole-second and sub-second parts. Using only c.attoseconds (the
+        // sub-second component) previously discarded the seconds portion entirely,
+        // making any call longer than ~1 s report its fractional remainder instead
+        // of its true elapsed time.
+        let nanoseconds = c.seconds * 1_000_000_000 + c.attoseconds / 1_000_000_000
+        callDuration.recordNanoseconds(nanoseconds)
     }
 
     func connectionOpened() {
