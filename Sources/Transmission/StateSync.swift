@@ -12,7 +12,11 @@ extension Syncable {
 public struct SyncedState<T: Codable & Sendable>: Sendable {
     public var value: T
     public private(set) var lastSyncedAt: Date?
-    public private(set) var isDirty: Bool = false
+    /// True whenever the local value has changed since the last successful sync.
+    /// Initialized to true because a freshly-created SyncedState has never been
+    /// synced to any peer (lastSyncedAt == nil), so the initial value must be
+    /// treated as pending sync just like any subsequent update.
+    public private(set) var isDirty: Bool = true
 
     public init(_ value: T) {
         self.value = value
