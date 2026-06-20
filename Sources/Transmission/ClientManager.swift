@@ -196,11 +196,11 @@ private enum ClientConnectionHandler {
         for try await frame in inbound {
             switch frame.opcode {
             case .text, .binary:
-                if let message = accumulator.feed(frame) {
+                if let message = try accumulator.feed(frame) {
                     await system.decodeAndDeliver(data: message, from: node)
                 }
             case .continuation:
-                if let message = accumulator.feed(frame) {
+                if let message = try accumulator.feed(frame) {
                     await system.decodeAndDeliver(data: message, from: node)
                 }
             case .ping:

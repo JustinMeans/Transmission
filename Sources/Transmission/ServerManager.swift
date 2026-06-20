@@ -145,12 +145,12 @@ private enum ServerConnectionHandler {
         for try await frame in inbound {
             switch frame.opcode {
             case .text, .binary:
-                if let message = accumulator.feed(frame) {
+                if let message = try accumulator.feed(frame) {
                     system.metrics.recordMessageReceived(bytes: message.count)
                     await system.decodeAndDeliver(data: message, from: node)
                 }
             case .continuation:
-                if let message = accumulator.feed(frame) {
+                if let message = try accumulator.feed(frame) {
                     system.metrics.recordMessageReceived(bytes: message.count)
                     await system.decodeAndDeliver(data: message, from: node)
                 }
@@ -183,14 +183,39 @@ private enum ServerConnectionHandler {
 /// - The partial buffer from the first fragment to be flushed with the NEXT unrelated
 ///   message, corrupting every subsequent delivery.
 struct FrameAccumulator {
+    /// Default ceiling on the total size of a single reassembled message: 16 MiB.
+    /// Generous for legitimate RPC traffic (calls/replies are typically bytes to
+    /// kilobytes) yet small enough to bound adversarial growth.
+    static let defaultMaxMessageSize = 16 * 1024 * 1024
+
     private var buffer = Data()
+    private let maxMessageSize: Int
+
+    init(maxMessageSize: Int = FrameAccumulator.defaultMaxMessageSize) {
+        self.maxMessageSize = maxMessageSize
+    }
 
     /// Feed one inbound frame. Returns the assembled message data when the final
     /// fragment (or a standalone non-fragmented frame) has been received;
     /// returns nil when more frames are still needed to complete the message.
-    mutating func feed(_ frame: WebSocketFrame) -> Data? {
+    ///
+    /// Throws `TransmissionError.decodingFailed` if appending the frame would push
+    /// the accumulated message past `maxMessageSize`. Without this bound a malicious
+    /// peer could stream an unbounded sequence of `.continuation` frames with
+    /// `fin == false`, growing `buffer` without limit and exhausting memory (a
+    /// classic WebSocket fragmentation DoS). The cap is enforced BEFORE the append
+    /// so the over-limit bytes are never materialized; the accumulator is reset on
+    /// rejection so the connection's next message starts clean.
+    mutating func feed(_ frame: WebSocketFrame) throws -> Data? {
         var frameData = frame.data
-        if let bytes = frameData.readBytes(length: frameData.readableBytes) {
+        let incoming = frameData.readableBytes
+        // Compare via subtraction to avoid Int overflow when buffer.count is large.
+        guard incoming <= maxMessageSize - buffer.count else {
+            buffer = Data()
+            throw TransmissionError.decodingFailed(
+                "Reassembled WebSocket message exceeds maximum size of \(maxMessageSize) bytes")
+        }
+        if let bytes = frameData.readBytes(length: incoming) {
             buffer.append(contentsOf: bytes)
         }
         guard frame.fin else { return nil }
