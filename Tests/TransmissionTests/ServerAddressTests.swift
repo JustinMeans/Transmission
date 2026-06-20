@@ -96,3 +96,72 @@ struct ServerAddressTests {
         #expect(set.count == 1)
     }
 }
+
+/// Regression tests for path normalization.
+///
+/// `ServerAddress.url` builds a `URL` via `URLComponents`. When an authority
+/// (host) is present, `URLComponents.url` returns `nil` for any non-empty path
+/// that does not begin with `/`. The `url` property previously force-unwrapped
+/// that result, so a `ServerAddress` constructed with a relative path such as
+/// `"ws"` would TRAP — crashing the whole process — the moment `url` was read
+/// (e.g. while establishing a connection).
+///
+/// The fix normalizes every path to leading-slash origin form in `init` and
+/// makes `url` non-trapping as defense in depth.
+@Suite("ServerAddress Path Normalization Tests")
+struct ServerAddressPathNormalizationTests {
+
+    @Test("Relative path is normalized to a leading-slash path")
+    func relativePathGetsLeadingSlash() {
+        let address = ServerAddress(scheme: .secure, host: "api.example.com", port: 443, path: "ws")
+        #expect(address.path == "/ws")
+    }
+
+    @Test("Path with leading slash is preserved unchanged")
+    func absolutePathPreserved() {
+        let address = ServerAddress(scheme: .secure, host: "api.example.com", port: 443, path: "/custom/ws")
+        #expect(address.path == "/custom/ws")
+    }
+
+    @Test("Empty path falls back to the default")
+    func emptyPathDefaults() {
+        let address = ServerAddress(scheme: .secure, host: "api.example.com", port: 443, path: "")
+        #expect(address.path == "/transmission")
+    }
+
+    @Test("url does not trap for a relative path (the regression)")
+    func urlDoesNotTrapForRelativePath() {
+        // Before the fix this construction stored "ws" verbatim and `url`
+        // force-unwrapped a nil URLComponents.url, crashing the process.
+        let address = ServerAddress(scheme: .secure, host: "api.example.com", port: 8443, path: "ws")
+        let url = address.url
+        #expect(url.scheme == "wss")
+        #expect(url.host == "api.example.com")
+        #expect(url.port == 8443)
+        #expect(url.path == "/ws")
+    }
+
+    @Test("Description is well-formed for a relative path input")
+    func descriptionWellFormedForRelativePath() {
+        let address = ServerAddress(scheme: .insecure, host: "localhost", port: 8080, path: "ws")
+        #expect(address.description == "ws://localhost:8080/ws")
+    }
+
+    @Test("Round-trip: url string from a relative-path address re-parses identically")
+    func relativePathRoundTrip() throws {
+        let original = ServerAddress(scheme: .secure, host: "api.example.com", port: 8443, path: "ws")
+        let reparsed = try #require(ServerAddress(url: original.description))
+        #expect(reparsed.scheme == original.scheme)
+        #expect(reparsed.host == original.host)
+        #expect(reparsed.port == original.port)
+        #expect(reparsed.path == original.path)
+        #expect(reparsed == original)
+    }
+
+    @Test("Equality is unaffected by relative vs absolute input for the same path")
+    func relativeAndAbsoluteInputsAreEqual() {
+        let relative = ServerAddress(scheme: .secure, host: "h", port: 1, path: "p")
+        let absolute = ServerAddress(scheme: .secure, host: "h", port: 1, path: "/p")
+        #expect(relative == absolute)
+    }
+}

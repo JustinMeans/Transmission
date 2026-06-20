@@ -16,7 +16,7 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
         self.scheme = scheme
         self.host = host
         self.port = port
-        self.path = path
+        self.path = Self.normalizedPath(path)
     }
 
     /// Creates an address from a URL string.
@@ -35,13 +35,36 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
         self.init(scheme: scheme, host: host, port: port, path: path)
     }
 
+    /// Normalizes a request path so it is always a valid origin-form URI path.
+    ///
+    /// A path that is empty, or that does not begin with `/`, is invalid as the
+    /// path component of a URL that carries an authority (host). `URLComponents`
+    /// returns `nil` for its `url` in that case, which previously caused the
+    /// force-unwrap in `url` to trap and crash the process. Callers may pass an
+    /// authority-relative path (e.g. `"ws"`); normalize it to `"/ws"` so the
+    /// resulting `ServerAddress` always produces a usable URL and a well-formed
+    /// `description`.
+    static func normalizedPath(_ path: String) -> String {
+        if path.isEmpty { return "/transmission" }
+        if path.hasPrefix("/") { return path }
+        return "/" + path
+    }
+
     public var url: URL {
         var components = URLComponents()
         components.scheme = scheme.rawValue
         components.host = host
         components.port = port
         components.path = path
-        return components.url!
+        // `path` is normalized to a leading-slash origin-form path in `init`, so
+        // `components.url` is non-nil here. Fall back defensively rather than
+        // force-unwrapping: a trap in `url` would crash the whole process on an
+        // otherwise recoverable input.
+        if let url = components.url {
+            return url
+        }
+        return URL(string: "\(scheme.rawValue)://\(host):\(port)\(path)")
+            ?? URL(string: "\(scheme.rawValue)://\(host):\(port)/transmission")!
     }
 
     public var description: String {
