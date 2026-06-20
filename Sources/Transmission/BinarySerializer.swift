@@ -278,6 +278,16 @@ extension WireEnvelope {
                 args: args,
                 priority: priority
             )
+            // A `.call` is fully length-described by its own fields: once the args
+            // array closes the structure there must be nothing left. Any residual
+            // bytes mean the frame is malformed (corruption) or that a second,
+            // smuggled payload has been appended after a structurally-complete
+            // envelope. Reject it rather than silently discarding the tail — a
+            // permissive decoder lets an attacker hide bytes the framing layer
+            // believes it has accounted for (frame-ambiguity / integrity evasion).
+            guard decoder.bytesRemaining == 0 else {
+                throw TransmissionError.decodingFailed("Trailing \(decoder.bytesRemaining) byte(s) after call envelope")
+            }
             return .call(envelope)
 
         case .reply:
@@ -294,6 +304,12 @@ extension WireEnvelope {
 
             let value = try decoder.readBytes()
             let envelope = ReplyEnvelope(callID: callID, sender: sender, value: value)
+            // Same strict-consumption contract as `.call`: the reply's length-
+            // prefixed `value` closes the structure, so residual bytes indicate a
+            // malformed or smuggled frame and must be rejected, not ignored.
+            guard decoder.bytesRemaining == 0 else {
+                throw TransmissionError.decodingFailed("Trailing \(decoder.bytesRemaining) byte(s) after reply envelope")
+            }
             return .reply(envelope)
 
         case .close:
