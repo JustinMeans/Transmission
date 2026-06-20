@@ -239,6 +239,14 @@ extension WireEnvelope {
                 throw TransmissionError.decodingFailed("Generic substitution count overflows Int: \(rawSubsCount)")
             }
             let subsCount = Int(rawSubsCount)
+            // Each substitution is at minimum a 1-byte varint length (an empty
+            // string). A declared count larger than the bytes left in the buffer
+            // is therefore provably unsatisfiable. Reject it before reserving
+            // capacity so a tiny adversarial frame cannot drive a multi-gigabyte
+            // allocation (OOM/DoS) on the inbound transport path.
+            guard subsCount <= decoder.bytesRemaining else {
+                throw TransmissionError.decodingFailed("Generic substitution count \(subsCount) exceeds remaining bytes \(decoder.bytesRemaining)")
+            }
             var genericSubs: [String] = []
             genericSubs.reserveCapacity(subsCount)
             for _ in 0..<subsCount {
@@ -250,6 +258,12 @@ extension WireEnvelope {
                 throw TransmissionError.decodingFailed("Argument count overflows Int: \(rawArgsCount)")
             }
             let argsCount = Int(rawArgsCount)
+            // Each argument is at minimum a 1-byte varint length (empty Data).
+            // Same bound as genericSubs: reject any count larger than the bytes
+            // left so reserveCapacity cannot be coerced into a huge allocation.
+            guard argsCount <= decoder.bytesRemaining else {
+                throw TransmissionError.decodingFailed("Argument count \(argsCount) exceeds remaining bytes \(decoder.bytesRemaining)")
+            }
             var args: [Data] = []
             args.reserveCapacity(argsCount)
             for _ in 0..<argsCount {
