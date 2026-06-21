@@ -175,4 +175,63 @@ struct WebSocketHandshakeTests {
             try validateWebSocketHandshakeHeaders(headers)
         }
     }
+
+    // MARK: - Duplicate case-variant header names (crash regression)
+
+    /// Before the fix, `validateWebSocketHandshakeHeaders` built its case-insensitive
+    /// lookup with `Dictionary(uniqueKeysWithValues:)`. That initialiser calls
+    /// `preconditionFailure` when the key sequence contains duplicates — so any
+    /// caller that supplied two keys differing only in case (e.g. `"Upgrade"` and
+    /// `"upgrade"`) caused an unrecoverable trap, crashing the process without any
+    /// chance for the caller to handle the error. Real HTTP/1.1 stacks can and do
+    /// forward repeated or differently-cased header fields.
+    ///
+    /// The fix switches to `Dictionary(_:uniquingKeysWith:)` (last-value-wins),
+    /// which tolerates duplicates and lets validation proceed (or throw a typed
+    /// error) rather than trapping.
+    ///
+    /// The two tests below exercise the two non-trapping outcomes:
+    ///   1. All duplicates carry the correct value  → success (returns the key).
+    ///   2. All duplicates carry the wrong value    → typed error, not trap.
+    ///
+    /// Iteration order over a `[String: String]` literal is unspecified, so the
+    /// tests are written so the expected outcome is the same regardless of which
+    /// duplicate value the merge picks: both values are either uniformly correct
+    /// (test 1) or uniformly wrong (test 2).
+
+    /// When every case-variant copy of a header carries a valid value the function
+    /// MUST succeed, not trap.
+    @Test("duplicate case-variant header names with valid values do not trap")
+    func duplicateCaseVariantValidHeadersDoNotTrap() throws {
+        // Both "Upgrade" and "upgrade" carry "websocket" — whichever value the
+        // merge selects, the function must succeed without trapping.
+        let headers: [String: String] = [
+            "Upgrade":                "websocket",
+            "upgrade":                "websocket",
+            "Connection":             "Upgrade",
+            "Sec-WebSocket-Version":  "13",
+            "Sec-WebSocket-Key":      "dGhlIHNhbXBsZSBub25jZQ==",
+        ]
+        // Must NOT trap. Must return the key.
+        let key = try validateWebSocketHandshakeHeaders(headers)
+        #expect(key == "dGhlIHNhbXBsZSBub25jZQ==")
+    }
+
+    /// When every case-variant copy of a header carries an invalid value the
+    /// function MUST throw a typed error, not trap.
+    @Test("duplicate case-variant header names with invalid values throw, not trap")
+    func duplicateCaseVariantInvalidHeadersThrowNotTrap() {
+        // Both "Upgrade" and "upgrade" carry "h2c" — whichever value the merge
+        // selects, the function must throw `missingUpgradeHeader`, not trap.
+        let headers: [String: String] = [
+            "Upgrade":                "h2c",
+            "upgrade":                "h2c",
+            "Connection":             "Upgrade",
+            "Sec-WebSocket-Version":  "13",
+            "Sec-WebSocket-Key":      "dGhlIHNhbXBsZSBub25jZQ==",
+        ]
+        #expect(throws: WebSocketHandshakeError.missingUpgradeHeader) {
+            try validateWebSocketHandshakeHeaders(headers)
+        }
+    }
 }

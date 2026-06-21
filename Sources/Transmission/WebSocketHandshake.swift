@@ -83,8 +83,14 @@ public func validateWebSocketHandshakeHeaders(
     _ headers: [String: String]
 ) throws -> String {
     // Build a case-insensitive lookup over the provided headers.
+    // `Dictionary(uniqueKeysWithValues:)` traps on duplicate keys; use the
+    // merging initialiser so that duplicate case-variant header names (e.g.
+    // "Upgrade" and "upgrade" both present in the same map) do not crash the
+    // process. HTTP/1.1 allows repeated header fields; keeping the last value
+    // matches the standard "last value wins" merge policy.
     let normalized = Dictionary(
-        uniqueKeysWithValues: headers.map { ($0.key.lowercased(), $0.value) }
+        headers.map { ($0.key.lowercased(), $0.value) },
+        uniquingKeysWith: { _, last in last }
     )
 
     // 1. Upgrade: websocket
