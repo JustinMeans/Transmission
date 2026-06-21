@@ -190,14 +190,36 @@ struct FrameAccumulator {
 
     private var buffer = Data()
     private let maxMessageSize: Int
+    /// True while a fragmented message is open: the first data frame arrived with
+    /// `fin == false` and the terminating `.continuation` frame (`fin == true`) has
+    /// not yet been seen. Used to enforce the RFC 6455 fragmentation state machine.
+    private var messageInProgress = false
 
     init(maxMessageSize: Int = FrameAccumulator.defaultMaxMessageSize) {
         self.maxMessageSize = maxMessageSize
     }
 
-    /// Feed one inbound frame. Returns the assembled message data when the final
-    /// fragment (or a standalone non-fragmented frame) has been received;
+    /// Feed one inbound data frame. Returns the assembled message data when the
+    /// final fragment (or a standalone non-fragmented frame) has been received;
     /// returns nil when more frames are still needed to complete the message.
+    ///
+    /// Only data opcodes participate in reassembly: a fragmented message begins with
+    /// a `.text` or `.binary` frame (`fin == false`), continues with `.continuation`
+    /// frames, and ends with a `.continuation` frame carrying `fin == true`
+    /// (RFC 6455 section 5.4). This method enforces that state machine and rejects
+    /// two framing violations the prior size-only guard silently accepted:
+    ///
+    /// 1. An **orphan continuation**: a `.continuation` frame arriving with no
+    ///    message in progress. Previously its bytes were treated as a complete
+    ///    standalone message, letting a peer forge a delivery out of a bare
+    ///    continuation frame.
+    /// 2. An **interleaved message start**: a new `.text` / `.binary` frame arriving
+    ///    while a fragmented message is still open. Previously its bytes were
+    ///    concatenated onto the unfinished message, fusing two logically distinct
+    ///    messages (message-boundary confusion / cross-message data injection).
+    ///
+    /// Non-data control opcodes (ping/pong/close) are handled by the caller and must
+    /// not be fed here; doing so throws rather than corrupting reassembly state.
     ///
     /// Throws `TransmissionError.decodingFailed` if appending the frame would push
     /// the accumulated message past `maxMessageSize`. Without this bound a malicious
@@ -207,21 +229,58 @@ struct FrameAccumulator {
     /// so the over-limit bytes are never materialized; the accumulator is reset on
     /// rejection so the connection's next message starts clean.
     mutating func feed(_ frame: WebSocketFrame) throws -> Data? {
+        // Validate the opcode against the current fragmentation state BEFORE
+        // touching the buffer, so a rejected frame's bytes are never accumulated.
+        switch frame.opcode {
+        case .continuation:
+            guard messageInProgress else {
+                // A continuation frame with nothing to continue. Reset to a clean
+                // slate so the connection's next legitimate message is unaffected.
+                reset()
+                throw TransmissionError.decodingFailed(
+                    "Unexpected continuation frame: no fragmented message in progress")
+            }
+        case .text, .binary:
+            guard !messageInProgress else {
+                // A new data frame arrived mid-fragmentation. The open message can
+                // never be completed correctly, so discard it and reject.
+                reset()
+                throw TransmissionError.decodingFailed(
+                    "Unexpected \(frame.opcode) frame while a fragmented message is in progress")
+            }
+        default:
+            // Control frames (ping/pong/close) are not reassembled; the caller
+            // dispatches them separately. Never let one mutate buffer state.
+            reset()
+            throw TransmissionError.decodingFailed(
+                "Non-data frame opcode \(frame.opcode) cannot be reassembled")
+        }
+
         var frameData = frame.data
         let incoming = frameData.readableBytes
         // Compare via subtraction to avoid Int overflow when buffer.count is large.
         guard incoming <= maxMessageSize - buffer.count else {
-            buffer = Data()
+            reset()
             throw TransmissionError.decodingFailed(
                 "Reassembled WebSocket message exceeds maximum size of \(maxMessageSize) bytes")
         }
         if let bytes = frameData.readBytes(length: incoming) {
             buffer.append(contentsOf: bytes)
         }
-        guard frame.fin else { return nil }
+        guard frame.fin else {
+            // First/intermediate fragment of a still-open message.
+            messageInProgress = true
+            return nil
+        }
         let message = buffer
-        buffer = Data()
+        reset()
         return message
+    }
+
+    /// Clears all reassembly state so the next message starts from a clean slate.
+    private mutating func reset() {
+        buffer = Data()
+        messageInProgress = false
     }
 }
 
