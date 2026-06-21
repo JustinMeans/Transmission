@@ -160,6 +160,12 @@ private enum ServerConnectionHandler {
             case .pong:
                 break
             case .connectionClose:
+                // RFC 6455 section 5.5.1: upon receiving a Close frame the endpoint
+                // MUST send a Close frame in response before closing the connection.
+                // Echo the received payload (status code + reason) back to the peer,
+                // substituting a 1002 Protocol Error when the payload is malformed.
+                let echo = webSocketCloseEchoFrame(for: frame)
+                try await outbound.write(echo)
                 return
             default:
                 break
