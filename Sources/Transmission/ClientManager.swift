@@ -50,6 +50,7 @@ public actor ClientManager {
             attempt += 1
             await updateStatus(attempt == 1 ? .connecting : .reconnecting(attempt: attempt))
 
+            var cleanExit = false
             do {
                 try await ClientConnectionHandler.establishConnection(
                     to: address,
@@ -58,15 +59,25 @@ public actor ClientManager {
                         await self?.updateStatus(.connected)
                     }
                 )
+                // Connection closed cleanly. Reset backoff so any error in the
+                // next session starts from immediate retry (delay == 0), not from
+                // the cursor position advanced by prior error accumulation.
+                // Do NOT call backoff.next() here — doing so would silently advance
+                // the internal cursor from 0 to minimum even though the returned
+                // delay is zero, penalising the first failure of the next session.
                 backoff.reset()
                 attempt = 0
+                cleanExit = true
             } catch is CancellationError {
                 break
             } catch {
                 await updateStatus(.failed(error.localizedDescription))
             }
 
-            if let delay = backoff.next(), delay > 0 {
+            // Skip on clean exit: backoff was just reset and calling next() here
+            // would advance the cursor to minimum, delaying the first failure of
+            // the next session by minimum seconds instead of retrying immediately.
+            if !cleanExit, let delay = backoff.next(), delay > 0 {
                 do {
                     try await Task.sleep(for: .seconds(delay))
                 } catch {

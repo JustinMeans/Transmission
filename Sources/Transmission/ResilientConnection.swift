@@ -62,21 +62,32 @@ public actor ResilientConnection {
             attempt += 1
             updateStatus(attempt == 1 ? .connecting : .reconnecting(attempt: attempt))
 
+            var cleanExit = false
             do {
                 try await action()
                 // action() returned normally, meaning the connection was established
-                // and has since closed cleanly. Reset backoff for the next attempt
-                // but do NOT flash .connected here — the connection is already gone.
+                // and has since closed cleanly. Reset backoff so that any subsequent
+                // failure retries start from the initial zero delay rather than from
+                // the cursor position left by the previous session's error sequence.
+                //
+                // Crucially we do NOT call backoff.next() on the clean-exit path:
+                // next() advances the internal cursor even when the returned delay is
+                // zero (it moves current from 0 to minimum). Calling it here would
+                // mean the *first* error in the next session receives a minimum-delay
+                // penalty instead of the intended immediate retry.
                 backoff.reset()
                 attempt = 0
+                cleanExit = true
             } catch is CancellationError {
                 break
             } catch {
                 updateStatus(.failed(error.localizedDescription))
             }
 
-            // Wait before retry
-            if let delay = backoff.next(), delay > 0 {
+            // Wait before retry — skip on clean exit because backoff was just reset
+            // to zero and advancing the cursor here would silently penalise the first
+            // failure of the next connection session (see comment above).
+            if !cleanExit, let delay = backoff.next(), delay > 0 {
                 do {
                     try await Task.sleep(for: .seconds(delay))
                 } catch {

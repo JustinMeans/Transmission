@@ -257,4 +257,72 @@ struct ResilientConnectionTests {
             "Second session must attempt at least once within 50 ms — backoff must be reset on stop()"
         )
     }
+
+    /// Regression test: after a clean close the first *error* of the next session
+    /// must be retried immediately (delay == 0), not penalised by the minimum backoff.
+    ///
+    /// Before the fix, `connectionLoop()` called `backoff.next()` unconditionally in
+    /// the "Wait before retry" block at the end of every loop iteration — including
+    /// after a clean exit where `backoff.reset()` had just been called. Although the
+    /// returned delay was 0 (so no sleep occurred), `next()` advanced the internal
+    /// cursor from 0 to `minimum`. The NEXT call to `next()` (on the first error
+    /// after the clean reconnect) then returned `minimum` instead of 0, imposing an
+    /// unwanted sleep between the failure and the retry.
+    ///
+    /// After the fix, `next()` is NOT called on the clean-exit path, so the cursor
+    /// stays at 0. The first failure of the new session correctly gets a 0 delay
+    /// (immediate retry).
+    @Test("First error after a clean close is retried immediately, not after minimum delay")
+    func firstErrorAfterCleanCloseIsImmediate() async throws {
+        // Use a large, deterministic minimum so any spurious delay is obvious:
+        // jitter=0 makes timing predictable; minimum=0.3s is 6× the 50ms window.
+        let backoff = ExponentialBackoff(
+            initial: 0,
+            minimum: 0.3,    // 300 ms — much larger than our 50 ms observation window
+            maximum: 1.0,
+            multiplier: 2.0,
+            jitter: 0
+        )
+
+        // Phase tracking:
+        //   phase 0 → first call: close cleanly (return without throwing)
+        //   phase 1 → second call: throw an error (triggers backoff)
+        //   phase 2+ → third call onwards: return to stop the loop
+        let phase = AtomicCounter(0)
+        let errorRetryAttempted = AtomicBool(false)
+
+        let connection = ResilientConnection(backoff: backoff) {
+            let p = phase.increment()   // 1, 2, 3, …
+            switch p {
+            case 1:
+                // Phase 1: clean close — action returns without throwing.
+                // After this, backoff.reset() is called; current must stay 0.
+                return
+            case 2:
+                // Phase 2: first error in the new session.
+                // Before the fix, next() had already advanced the cursor to minimum
+                // (0.3 s), so reaching here would take ≥300 ms after the phase-1 exit.
+                // After the fix, the cursor is still 0, so we arrive here immediately.
+                errorRetryAttempted.value = true
+                throw TransmissionError.connectionFailed("first error after clean close")
+            default:
+                // Phase 3+: stop looping to end the test quickly.
+                throw CancellationError()
+            }
+        }
+
+        await connection.start()
+
+        // Phase 1 (clean close) is near-instant. Phase 2 (the error) should also be
+        // near-instant because the first post-clean-close retry has a 0-delay.
+        // 50 ms is well within the zero-delay window but far below the 300 ms minimum
+        // that the bug would impose. We give 100 ms total to be safe on slow CI.
+        try await Task.sleep(for: .milliseconds(100))
+        await connection.stop()
+
+        #expect(
+            errorRetryAttempted.value,
+            "First error after a clean close must be retried within 100 ms (delay must be 0, not minimum=300 ms)"
+        )
+    }
 }
