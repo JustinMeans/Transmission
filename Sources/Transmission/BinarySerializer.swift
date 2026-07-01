@@ -155,10 +155,14 @@ public struct CompactDecoder: Sendable {
 
     public mutating func readOptionalString() throws -> String? {
         let hasValue = try readUInt8()
-        if hasValue == 1 {
+        switch hasValue {
+        case 0:
+            return nil
+        case 1:
             return try readString()
+        default:
+            throw TransmissionError.decodingFailed("Invalid optional presence byte: \(hasValue); expected 0 or 1")
         }
-        return nil
     }
 }
 
