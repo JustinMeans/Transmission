@@ -5,6 +5,7 @@ import NIOWebSocket
 import Logging
 
 #if canImport(Network)
+import Network
 import NIOTransportServices
 #else
 import NIOPosix
@@ -95,13 +96,17 @@ public actor ClientManager {
     }
 }
 
-private enum ClientConnectionHandler {
+enum ClientConnectionHandler {
+    static func requiresTLS(_ scheme: ServerAddress.Scheme) -> Bool {
+        scheme == .secure
+    }
+
     static func establishConnection(
         to address: ServerAddress,
         system: TransmissionSystem,
         onConnected: @escaping @Sendable () async -> Void
     ) async throws {
-        let bootstrap = createBootstrap()
+        let bootstrap = createBootstrap(for: address.scheme)
 
         let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
             upgradePipelineHandler: { channel, upgradeResponse in
@@ -234,11 +239,17 @@ private enum ClientConnectionHandler {
     }
 
     #if canImport(Network)
-    static func createBootstrap() -> NIOTSConnectionBootstrap {
-        NIOTSConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
+    static func createBootstrap(for scheme: ServerAddress.Scheme) -> NIOTSConnectionBootstrap {
+        let bootstrap = NIOTSConnectionBootstrap(group: NIOTSEventLoopGroup.singleton)
+        if requiresTLS(scheme) {
+            return bootstrap.tlsOptions(NWProtocolTLS.Options())
+        }
+        return bootstrap
     }
     #else
-    static func createBootstrap() -> ClientBootstrap {
+    static func createBootstrap(for scheme: ServerAddress.Scheme) -> ClientBootstrap {
+        // TODO: Add TLS support for wss:// on the NIOPosix (Linux) path via NIOSSL.
+        // Behavior intentionally unchanged: wss currently only affects the default port here.
         ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
     }
     #endif
