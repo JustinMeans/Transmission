@@ -37,6 +37,7 @@ extension Application {
             let routes = application.grouped(middleware)
             routes.webSocket(
                 PathComponent(stringLiteral: path),
+                maxFrameSize: WebSocketMaxFrameSize(integerLiteral: 64 << 20),
                 shouldUpgrade: { req in
                     var headers = HTTPHeaders()
                     headers.add(name: "X-Server-Node-ID", value: serverNodeID)

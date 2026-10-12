@@ -109,6 +109,7 @@ enum ClientConnectionHandler {
         let bootstrap = createBootstrap(for: address.scheme)
 
         let upgrader = NIOTypedWebSocketClientUpgrader<UpgradeResult>(
+            maxFrameSize: 64 << 20,
             upgradePipelineHandler: { channel, upgradeResponse in
                 channel.eventLoop.makeCompletedFuture {
                     let asyncChannel = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(
