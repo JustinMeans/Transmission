@@ -12,12 +12,39 @@ public actor NodeDirectory {
 
     private var nodes: [NodeIdentity: NodeState] = [:]
     private var _defaultNode: NodeIdentity?
+    /// Lets a client address its server as `NodeIdentity.server` whatever id the
+    /// server actually reports.
+    private var upstream: NodeIdentity?
 
     public init() {}
 
     /// Registers a connected node.
     public func register(_ node: RemoteNode) {
+        _ = adopt(node)
+    }
+
+    /// Registers the node a client dialled, so `NodeIdentity.server` reaches it.
+    func registerUpstream(_ node: RemoteNode) -> RemoteNode? {
+        let replaced = adopt(node)
+        guard node.nodeID != .server else { return replaced }
+        upstream = node.nodeID
+        if case .pending(let waiters) = nodes[.server] {
+            nodes[.server] = nil
+            for waiter in waiters {
+                waiter.continuation.resume(returning: node)
+            }
+        }
+        return replaced
+    }
+
+    /// Registers `node`, returning the connection it displaced, if any.
+    @discardableResult
+    func adopt(_ node: RemoteNode) -> RemoteNode? {
         let nodeID = node.nodeID
+        var replaced: RemoteNode?
+        if case .connected(let existing) = nodes[nodeID], existing !== node {
+            replaced = existing
+        }
 
         if case .pending(let waiters) = nodes[nodeID] {
             for waiter in waiters {
@@ -30,9 +57,23 @@ public actor NodeDirectory {
         if _defaultNode == nil {
             _defaultNode = nodeID
         }
+        return replaced
     }
 
-    /// Unregisters a node.
+    /// Unregisters this exact connection. A no-op when a newer connection has
+    /// already taken the id, which is what makes a late close from an old
+    /// socket harmless. Returns whether anything was removed.
+    @discardableResult
+    public func unregister(_ node: RemoteNode) -> Bool {
+        guard case .connected(let current) = nodes[node.nodeID], current === node else {
+            return false
+        }
+        unregister(node.nodeID)
+        return true
+    }
+
+    /// Unregisters whatever connection holds this id. Prefer `unregister(_: RemoteNode)`
+    /// from connection teardown.
     public func unregister(_ nodeID: NodeIdentity) {
         if case .pending(let waiters) = nodes[nodeID] {
             for waiter in waiters {
@@ -44,10 +85,15 @@ public actor NodeDirectory {
         if _defaultNode == nodeID {
             _defaultNode = nodes.keys.first
         }
+        if upstream == nodeID {
+            upstream = nil
+        }
     }
 
     /// Gets a node, waiting if necessary.
-    public func node(for nodeID: NodeIdentity, timeout: Duration) async throws -> RemoteNode {
+    public func node(for requested: NodeIdentity, timeout: Duration) async throws -> RemoteNode {
+        let nodeID = requested == .server ? (upstream ?? requested) : requested
+
         // If already connected, return immediately
         if case .connected(let node) = nodes[nodeID] {
             return node

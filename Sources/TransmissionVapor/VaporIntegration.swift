@@ -25,9 +25,17 @@ extension Application {
             self.system = system
         }
 
+        /// Mounts the Transmission route.
+        ///
+        /// The route is open unless `middleware` says otherwise: pass auth
+        /// middleware, which runs before the upgrade. `onConnect` runs once per
+        /// connection before its first call is dispatched, so it can copy the
+        /// authenticated user onto the node for handlers to read through
+        /// `RemoteNode.current`. If it throws, the socket closes.
         public func configure(
             path: String = "transmission",
-            middleware: [any Middleware] = []
+            middleware: [any Middleware] = [],
+            onConnect: (@Sendable (Request, RemoteNode) async throws -> Void)? = nil
         ) throws {
             guard let system else {
                 throw Abort(.internalServerError, reason: "TransmissionSystem not registered")
@@ -35,19 +43,18 @@ extension Application {
 
             let serverNodeID = system.nodeID.id
             let routes = application.grouped(middleware)
+            let upgraded: @Sendable (Request, WebSocket) -> Void = { req, ws in
+                VaporWebSocketBridge.accept(req: req, ws: ws, system: system, onConnect: onConnect)
+            }
             routes.webSocket(
                 PathComponent(stringLiteral: path),
-                maxFrameSize: WebSocketMaxFrameSize(integerLiteral: 64 << 20),
+                maxFrameSize: WebSocketMaxFrameSize(integerLiteral: system.maxFrameSize),
                 shouldUpgrade: { req in
                     var headers = HTTPHeaders()
                     headers.add(name: "X-Server-Node-ID", value: serverNodeID)
                     return req.eventLoop.makeSucceededFuture(headers)
                 },
-                onUpgrade: { req, ws in
-                    Task {
-                        await VaporWebSocketBridge.handleWebSocket(req: req, ws: ws, system: system)
-                    }
-                }
+                onUpgrade: upgraded
             )
         }
     }
@@ -59,6 +66,7 @@ public actor VaporWebSocketBridge {
     private let nodeID: NodeIdentity
     private let system: TransmissionSystem
     private let remoteNode: RemoteNode
+    private let dispatcher: InboundDispatcher
     private var isClosed = false
 
     init(ws: WebSocket, nodeID: NodeIdentity, system: TransmissionSystem) {
@@ -67,37 +75,78 @@ public actor VaporWebSocketBridge {
         self.system = system
 
         // Create a RemoteNode that sends via Vapor's WebSocket
-        self.remoteNode = RemoteNode(
+        let node = RemoteNode(
             nodeID: nodeID,
             send: { [ws] data in
                 try await ws.send(raw: data, opcode: .binary)
             },
             close: { [ws] in
-                try? await ws.close()
-            }
+                try? await ws.close(code: .normalClosure)
+            },
+            maxFrameSize: system.maxFrameSize
         )
+        self.remoteNode = node
+        self.dispatcher = InboundDispatcher(system: system, node: node, limits: system.dispatchLimits)
     }
 
     /// Handles an incoming WebSocket connection.
     public static func handleWebSocket(req: Request, ws: WebSocket, system: TransmissionSystem) async {
-        let nodeID = req.headers.first(name: "X-Node-ID").map { NodeIdentity(id: $0) } ?? NodeIdentity.random()
-        let bridge = VaporWebSocketBridge(ws: ws, nodeID: nodeID, system: system)
-        await bridge.run()
+        let bridge = makeBridge(req: req, ws: ws, system: system)
+        await withCheckedContinuation { (attached: CheckedContinuation<Void, Never>) in
+            ws.eventLoop.execute {
+                bridge.attach()
+                attached.resume()
+            }
+        }
+        await bridge.run(req: req, onConnect: nil)
     }
 
-    func run() async {
+    /// Wires up a connection on the event loop, before any frame can be lost.
+    static func accept(
+        req: Request,
+        ws: WebSocket,
+        system: TransmissionSystem,
+        onConnect: (@Sendable (Request, RemoteNode) async throws -> Void)?
+    ) {
+        let bridge = makeBridge(req: req, ws: ws, system: system)
+        bridge.attach()
+        Task {
+            await bridge.run(req: req, onConnect: onConnect)
+        }
+    }
+
+    private static func makeBridge(req: Request, ws: WebSocket, system: TransmissionSystem) -> VaporWebSocketBridge {
+        let nodeID = req.headers.first(name: "X-Node-ID").map { NodeIdentity(id: $0) } ?? NodeIdentity.random()
+        return VaporWebSocketBridge(ws: ws, nodeID: nodeID, system: system)
+    }
+
+    /// Uses websocket-kit's synchronous callbacks. Its `async` overloads spawn a
+    /// `Task` per frame, which is what reordered calls (audit V4). This must run
+    /// on the WebSocket's event loop.
+    private nonisolated func attach() {
+        let dispatcher = self.dispatcher
+        let onBinary: @Sendable (WebSocket, ByteBuffer) -> Void = { _, buffer in
+            if let bytes = buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes) {
+                dispatcher.receive(Data(bytes))
+            }
+        }
+        let onText: @Sendable (WebSocket, String) -> Void = { _, text in
+            dispatcher.receive(Data(text.utf8))
+        }
+        ws.onBinary(onBinary)
+        ws.onText(onText)
+        if let heartbeat = system.serverHeartbeat {
+            let (seconds, attoseconds) = heartbeat.interval.components
+            ws.pingInterval = .nanoseconds(seconds * 1_000_000_000 + attoseconds / 1_000_000_000)
+        }
+    }
+
+    func run(req: Request, onConnect: (@Sendable (Request, RemoteNode) async throws -> Void)?) async {
         let bridge = self
 
         // Register this client's node so the server can send calls to it
-        await system.nodes.register(remoteNode)
-
-        ws.onText { [bridge] _, text in
-            await bridge.handleText(text)
-        }
-
-        ws.onBinary { [bridge] _, buffer in
-            await bridge.handleBinary(buffer)
-        }
+        await system.adopt(remoteNode)
+        system.metrics.connectionOpened()
 
         ws.onClose.whenComplete { [bridge] _ in
             Task {
@@ -105,58 +154,24 @@ public actor VaporWebSocketBridge {
             }
         }
 
-        try? await ws.onClose.get()
-    }
-
-    private func handleText(_ text: String) async {
-        guard let data = text.data(using: .utf8) else { return }
-        await processMessage(data)
-    }
-
-    private func handleBinary(_ buffer: ByteBuffer) async {
-        guard let bytes = buffer.getBytes(at: 0, length: buffer.readableBytes) else { return }
-        let data = Data(bytes)
-        await processMessage(data)
-    }
-
-    private func processMessage(_ data: Data) async {
         do {
-            let envelope: WireEnvelope
-
-            if let firstByte = data.first, firstByte <= 2 {
-                envelope = try WireEnvelope.decodeCompact(from: data)
-            } else {
-                let decoder = JSONDecoder()
-                decoder.userInfo[.transmissionSystem] = system
-                envelope = try decoder.decode(WireEnvelope.self, from: data)
-            }
-
-            switch envelope {
-            case .call(let call):
-                await handleCall(call)
-            case .reply(let reply):
-                await system.pendingCalls.receive(reply: reply)
-            case .close:
-                await handleClose()
-            }
+            try await onConnect?(req, remoteNode)
+            dispatcher.start()
         } catch {
-            system.logger.error("Failed to decode message: \(error)")
+            system.logger.error("Connection rejected: \(error)")
+            await handleClose()
         }
-    }
 
-    private func handleCall(_ call: CallEnvelope) async {
-        let wsRef = ws
-
-        await system.handleCall(call) { replyData in
-            try await wsRef.send(raw: replyData, opcode: .binary)
-        }
+        try? await ws.onClose.get()
     }
 
     private func handleClose() async {
         guard !isClosed else { return }
         isClosed = true
-        try? await ws.close()
-        await system.nodeDidDisconnect(nodeID)
+        dispatcher.shutdown()
+        try? await ws.close(code: .normalClosure)
+        system.metrics.connectionClosed()
+        await system.nodeDidDisconnect(remoteNode)
     }
 
     /// Sends a wire envelope through the WebSocket.

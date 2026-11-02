@@ -64,6 +64,11 @@ distributed actor RegSvc {
         try? await Task.sleep(for: .milliseconds(milliseconds))
         return milliseconds
     }
+    distributed func userTag() async -> String? { await RemoteNode.current?.getUserInfo("user") }
+    distributed func waitForCancel() async {
+        try? await Task.sleep(for: .seconds(30))
+        await context.recorder.add(Task.isCancelled ? 1 : 0)
+    }
     distributed func call(peer: RegPeer) async throws -> Int { try await peer.pong() }
     /// Keeps a slot busy so that a nested call into this same actor has to get past it.
     distributed func reenter(from peer: RegPeer) async throws -> Int { try await peer.callBack(self) }
@@ -91,6 +96,7 @@ func withNIOServer<T: Sendable>(
     let port = freePort()
     let task = Task { try await server.runServer(at: address(port)) }
     defer { task.cancel() }
+    await eventually { (try? tcpPortAccepts(port)) == true }
     return try await body(server, service, port)
 }
 
@@ -98,6 +104,7 @@ func withNIOServer<T: Sendable>(
 func withVaporServer<T: Sendable>(
     id: String = "mainframe",
     middleware: [any Vapor.Middleware] = [],
+    onConnect: (@Sendable (Request, RemoteNode) async throws -> Void)? = nil,
     configure: @Sendable (TransmissionSystem) -> Void = { _ in },
     _ body: @Sendable (TransmissionSystem, RegSvc, Int) async throws -> T
 ) async throws -> T {
@@ -105,10 +112,11 @@ func withVaporServer<T: Sendable>(
     app.logger.logLevel = .critical
     app.http.server.configuration.hostname = "127.0.0.1"
     app.http.server.configuration.port = 0
+    app.http.server.configuration.shutdownTimeout = .milliseconds(100)
     let server = TransmissionSystem.server(id: id)
     configure(server)
     try app.transmission.register(server)
-    try app.transmission.configure(path: "transmission", middleware: middleware)
+    try app.transmission.configure(path: "transmission", middleware: middleware, onConnect: onConnect)
     let service = server.makeLocalActor(id: "svc") { RegSvc(actorSystem: server) }
     do {
         try await app.startup()

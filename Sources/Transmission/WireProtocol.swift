@@ -35,6 +35,10 @@ public enum WireEnvelope: Sendable, Codable {
     case call(CallEnvelope)
     case reply(ReplyEnvelope)
     case close
+    /// A call failed on the peer. A separate case because `.call` and `.reply`
+    /// reject trailing bytes, so neither can gain a field. Peers older than this
+    /// case log and drop it and the caller times out, which beats false success.
+    case error(ErrorEnvelope)
 }
 
 /// Envelope for a remote method call.
@@ -53,6 +57,36 @@ public struct CallEnvelope: Sendable, Codable {
         self.genericSubs = genericSubs
         self.args = args
         self.priority = priority
+    }
+}
+
+/// Envelope for a failed call.
+public struct ErrorEnvelope: Sendable, Codable {
+    public let callID: CallID
+    public let sender: ActorIdentity?
+    public let code: RemoteCallError.Code
+    public let errorType: String?
+    public let message: String
+    public let payload: Data?
+
+    public init(
+        callID: CallID,
+        sender: ActorIdentity?,
+        code: RemoteCallError.Code,
+        errorType: String?,
+        message: String,
+        payload: Data?
+    ) {
+        self.callID = callID
+        self.sender = sender
+        self.code = code
+        self.errorType = errorType
+        self.message = message
+        self.payload = payload
+    }
+
+    var asError: RemoteCallError {
+        RemoteCallError(callID: callID, code: code, errorType: errorType, message: message, payload: payload)
     }
 }
 

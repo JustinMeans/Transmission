@@ -16,6 +16,8 @@ public final class TransmissionEncoder: DistributedTargetInvocationEncoder, @unc
         self.system = system
         self.encoder = JSONEncoder()
         self.encoder.userInfo[.transmissionSystem] = system
+        // The stdlib's key: without it, actor references can't be arguments.
+        self.encoder.userInfo[.actorSystemKey] = system
     }
 
     public func recordGenericSubstitution<T>(_ type: T.Type) throws {

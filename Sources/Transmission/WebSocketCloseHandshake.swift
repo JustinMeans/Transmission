@@ -53,7 +53,7 @@ import NIOWebSocket
 ///    in the echo, which is informative and strictly conformant.
 ///
 /// - Parameter received: The raw payload bytes from the inbound Close frame,
-///   already unmasked (NIO unmasks client-to-server frames automatically).
+///   already unmasked.
 /// - Returns: The payload bytes to place in the outbound echo Close frame.
 public func webSocketCloseEchoPayload(from received: [UInt8]) -> [UInt8] {
     // Rule 1: empty → echo empty.
@@ -104,8 +104,8 @@ private let protocolErrorPayload: [UInt8] = [
 /// the rules in `webSocketCloseEchoPayload(from:)`.
 ///
 /// The returned frame has `fin == true` and opcode `.connectionClose`, matching
-/// RFC 6455 §5.5.1. Server-to-client frames are NOT masked (servers MUST NOT
-/// mask; only client-to-server frames carry a masking key per RFC 6455 §5.3).
+/// RFC 6455 §5.5.1. The frame is unmasked; a client must apply a key before
+/// writing it (RFC 6455 §5.3), which `RemoteNode.writeControl` does.
 ///
 /// Usage in a frame-processing loop:
 /// ```swift
@@ -118,7 +118,7 @@ private let protocolErrorPayload: [UInt8] = [
 /// - Parameter received: The inbound Close `WebSocketFrame` from the peer.
 /// - Returns: A well-formed Close `WebSocketFrame` to write to the outbound channel.
 public func webSocketCloseEchoFrame(for received: WebSocketFrame) -> WebSocketFrame {
-    var inData = received.data
+    var inData = received.unmaskedData
     let payloadBytes = inData.readBytes(length: inData.readableBytes) ?? []
     let echoPayload = webSocketCloseEchoPayload(from: payloadBytes)
     var buf = ByteBuffer()

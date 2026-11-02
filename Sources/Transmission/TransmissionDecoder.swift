@@ -15,11 +15,16 @@ public final class TransmissionDecoder: DistributedTargetInvocationDecoder, @unc
         self.system = system
         self.decoder = JSONDecoder()
         self.decoder.userInfo[.transmissionSystem] = system
+        // The stdlib's key: without it, actor references can't be arguments.
+        self.decoder.userInfo[.actorSystemKey] = system
     }
 
     public func decodeGenericSubstitutions() throws -> [Any.Type] {
-        envelope.genericSubs.compactMap { name in
-            _typeByName(name)
+        try envelope.genericSubs.map { name in
+            guard let type = _typeByName(name) else {
+                throw TransmissionError.decodingFailed("Unknown generic substitution: \(name)")
+            }
+            return type
         }
     }
 

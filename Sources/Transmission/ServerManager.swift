@@ -18,8 +18,10 @@ public actor ServerManager {
         isRunning = true
 
         let serverNodeID = system.nodeID.id
+        let maxFrameSize = system.maxFrameSize
 
         let upgrader = NIOTypedWebSocketServerUpgrader<UpgradeResult>(
+            maxFrameSize: maxFrameSize,
             shouldUpgrade: { channel, head in
                 let clientNodeID = head.headers.first(name: "X-Node-ID")
                 var responseHeaders = HTTPHeaders()
@@ -29,12 +31,15 @@ public actor ServerManager {
                 }
                 return channel.eventLoop.makeSucceededFuture(responseHeaders)
             },
-            upgradePipelineHandler: { channel, upgradeResponse in
+            upgradePipelineHandler: { channel, upgradeRequest in
                 channel.eventLoop.makeCompletedFuture {
                     let asyncChannel = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(
                         wrappingChannelSynchronously: channel
                     )
-                    let clientNodeID = upgradeResponse.headers.first(name: "X-Client-Node-ID")
+                    // This is the request head, not the response: reading the
+                    // response header here gave every client a random id, so the
+                    // server could never call back to a node it knew by name.
+                    let clientNodeID = upgradeRequest.headers.first(name: "X-Node-ID")
                     return UpgradeResult.websocket(asyncChannel, clientNodeID: clientNodeID)
                 }
             }
@@ -106,70 +111,38 @@ private enum ServerConnectionHandler {
                 system.logger.debug("Client connected with random ID: \(nodeID.id)")
             }
 
+            let maxFrameSize = system.maxFrameSize
             let node = RemoteNode(
                 nodeID: nodeID,
                 channel: channel,
                 inbound: inbound,
-                outbound: outbound
+                outbound: outbound,
+                maxFrameSize: maxFrameSize
             )
 
-            await system.nodes.register(node)
+            await system.adopt(node)
             system.metrics.connectionOpened()
+            let dispatcher = system.makeInboundDispatcher(for: node)
+            dispatcher.start()
 
+            defer {
+                dispatcher.shutdown()
+                system.metrics.connectionClosed()
+            }
             do {
-                try await processFrames(
+                try await WebSocketSession.run(
                     inbound: inbound,
                     outbound: outbound,
-                    system: system,
-                    node: node
+                    node: node,
+                    dispatcher: dispatcher,
+                    maxMessageSize: maxFrameSize,
+                    heartbeat: system.serverHeartbeat
                 )
             } catch {
-                await system.nodeDidDisconnect(nodeID)
-                system.metrics.connectionClosed()
+                await system.nodeDidDisconnect(node)
                 throw error
             }
-
-            await system.nodeDidDisconnect(nodeID)
-            system.metrics.connectionClosed()
-        }
-    }
-
-    static func processFrames(
-        inbound: NIOAsyncChannelInboundStream<WebSocketFrame>,
-        outbound: NIOAsyncChannelOutboundWriter<WebSocketFrame>,
-        system: TransmissionSystem,
-        node: RemoteNode
-    ) async throws {
-        var accumulator = FrameAccumulator()
-
-        for try await frame in inbound {
-            switch frame.opcode {
-            case .text, .binary:
-                if let message = try accumulator.feed(frame) {
-                    system.metrics.recordMessageReceived(bytes: message.count)
-                    await system.decodeAndDeliver(data: message, from: node)
-                }
-            case .continuation:
-                if let message = try accumulator.feed(frame) {
-                    system.metrics.recordMessageReceived(bytes: message.count)
-                    await system.decodeAndDeliver(data: message, from: node)
-                }
-            case .ping:
-                let pong = WebSocketFrame(fin: true, opcode: .pong, data: frame.data)
-                try await outbound.write(pong)
-            case .pong:
-                break
-            case .connectionClose:
-                // RFC 6455 section 5.5.1: upon receiving a Close frame the endpoint
-                // MUST send a Close frame in response before closing the connection.
-                // Echo the received payload (status code + reason) back to the peer,
-                // substituting a 1002 Protocol Error when the payload is malformed.
-                let echo = webSocketCloseEchoFrame(for: frame)
-                try await outbound.write(echo)
-                return
-            default:
-                break
-            }
+            await system.nodeDidDisconnect(node)
         }
     }
 }
@@ -189,10 +162,9 @@ private enum ServerConnectionHandler {
 /// - The partial buffer from the first fragment to be flushed with the NEXT unrelated
 ///   message, corrupting every subsequent delivery.
 struct FrameAccumulator {
-    /// Default ceiling on the total size of a single reassembled message: 16 MiB.
-    /// Generous for legitimate RPC traffic (calls/replies are typically bytes to
-    /// kilobytes) yet small enough to bound adversarial growth.
-    static let defaultMaxMessageSize = 16 * 1024 * 1024
+    /// Default ceiling on the total size of a single reassembled message. The
+    /// same limit as a single frame, so there is one number to reason about.
+    static let defaultMaxMessageSize = TransmissionSystem.defaultMaxFrameSize
 
     private var buffer = Data()
     private let maxMessageSize: Int
@@ -262,7 +234,8 @@ struct FrameAccumulator {
                 "Non-data frame opcode \(frame.opcode) cannot be reassembled")
         }
 
-        var frameData = frame.data
+        // Client frames arrive masked and NIO does not unmask them for us.
+        var frameData = frame.unmaskedData
         let incoming = frameData.readableBytes
         // Compare via subtraction to avoid Int overflow when buffer.count is large.
         guard incoming <= maxMessageSize - buffer.count else {

@@ -15,6 +15,10 @@ public actor RemoteNode {
     private let sendClosure: (@Sendable (Data) async throws -> Void)?
     private let closeClosure: (@Sendable () async -> Void)?
 
+    /// RFC 6455 section 5.3: everything a client writes must be masked.
+    private let masksFrames: Bool
+    private let maxFrameSize: Int
+
     private var userInfo: [String: any Sendable] = [:]
     private var isClosed = false
 
@@ -25,26 +29,33 @@ public actor RemoteNode {
         nodeID: NodeIdentity,
         channel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame>,
         inbound: NIOAsyncChannelInboundStream<WebSocketFrame>,
-        outbound: NIOAsyncChannelOutboundWriter<WebSocketFrame>
+        outbound: NIOAsyncChannelOutboundWriter<WebSocketFrame>,
+        masksFrames: Bool = false,
+        maxFrameSize: Int = TransmissionSystem.defaultMaxFrameSize
     ) {
         self.nodeID = nodeID
         self.channel = channel
         self.outbound = outbound
         self.sendClosure = nil
         self.closeClosure = nil
+        self.masksFrames = masksFrames
+        self.maxFrameSize = maxFrameSize
     }
 
     /// Creates a RemoteNode with send/close closures (for Vapor servers)
     public init(
         nodeID: NodeIdentity,
         send: @escaping @Sendable (Data) async throws -> Void,
-        close: @escaping @Sendable () async -> Void
+        close: @escaping @Sendable () async -> Void,
+        maxFrameSize: Int = TransmissionSystem.defaultMaxFrameSize
     ) {
         self.nodeID = nodeID
         self.channel = nil
         self.outbound = nil
         self.sendClosure = send
         self.closeClosure = close
+        self.masksFrames = false
+        self.maxFrameSize = maxFrameSize
     }
 
     /// Serialization format for this connection. Defaults to binary for optimal performance.
@@ -65,18 +76,7 @@ public actor RemoteNode {
             data = try encoder.encode(envelope)
         }
 
-        // Use closure-based send if available (Vapor), otherwise NIO channel
-        if let sendClosure {
-            try await sendClosure(data)
-        } else if let channel, let outbound {
-            let opcode: WebSocketOpcode = serializationFormat == .binary ? .binary : .text
-            var buffer = channel.channel.allocator.buffer(capacity: data.count)
-            buffer.writeBytes(data)
-            let frame = WebSocketFrame(fin: true, opcode: opcode, data: buffer)
-            try await outbound.write(frame)
-        } else {
-            throw TransmissionError.noConnection
-        }
+        try await write(data, opcode: serializationFormat == .binary ? .binary : .text)
     }
 
     /// Sends raw data as a binary frame.
@@ -84,17 +84,34 @@ public actor RemoteNode {
         guard !isClosed else {
             throw TransmissionError.noConnection
         }
+        try await write(data, opcode: .binary)
+    }
 
+    /// Refuses an oversize message before it reaches the socket: the receiver
+    /// would tear the connection down and fail every other call in flight.
+    private func write(_ data: Data, opcode: WebSocketOpcode) async throws {
+        guard data.count <= maxFrameSize else {
+            throw TransmissionError.encodingFailed("Message of \(data.count) bytes exceeds the \(maxFrameSize) byte frame limit")
+        }
         if let sendClosure {
             try await sendClosure(data)
         } else if let channel, let outbound {
             var buffer = channel.channel.allocator.buffer(capacity: data.count)
             buffer.writeBytes(data)
-            let frame = WebSocketFrame(fin: true, opcode: .binary, data: buffer)
-            try await outbound.write(frame)
+            try await outbound.write(makeFrame(opcode, buffer))
         } else {
             throw TransmissionError.noConnection
         }
+    }
+
+    private func makeFrame(_ opcode: WebSocketOpcode, _ data: ByteBuffer) -> WebSocketFrame {
+        WebSocketFrame(fin: true, opcode: opcode, maskKey: masksFrames ? .random() : nil, data: data)
+    }
+
+    /// Writes a control frame on the NIO path, masked when this side is a client.
+    func writeControl(_ opcode: WebSocketOpcode, payload: ByteBuffer) async throws {
+        guard let outbound else { return }
+        try await outbound.write(makeFrame(opcode, payload))
     }
 
     /// Sends a ping frame.
@@ -103,8 +120,7 @@ public actor RemoteNode {
         guard let channel, let outbound else { return }
 
         let buffer = channel.channel.allocator.buffer(capacity: 0)
-        let frame = WebSocketFrame(fin: true, opcode: .ping, data: buffer)
-        try await outbound.write(frame)
+        try await outbound.write(makeFrame(.ping, buffer))
     }
 
     /// Closes this connection.
@@ -118,8 +134,7 @@ public actor RemoteNode {
             do {
                 var buffer = channel.channel.allocator.buffer(capacity: 2)
                 buffer.writeInteger(UInt16(1000)) // Normal closure
-                let frame = WebSocketFrame(fin: true, opcode: .connectionClose, data: buffer)
-                try await outbound.write(frame)
+                try await outbound.write(makeFrame(.connectionClose, buffer))
                 outbound.finish()
             } catch {
                 // Ignore close errors

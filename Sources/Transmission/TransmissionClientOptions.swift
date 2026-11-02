@@ -1,5 +1,14 @@
 import Foundation
 
+/// Connection status for monitoring.
+public enum ConnectionStatus: Sendable, Equatable {
+    case disconnected
+    case connecting
+    case connected
+    case reconnecting(attempt: Int)
+    case failed(String)
+}
+
 /// Controls how a client retries after a session ends, for any reason.
 public struct ReconnectPolicy: Sendable {
     /// Delay curve applied between attempts.

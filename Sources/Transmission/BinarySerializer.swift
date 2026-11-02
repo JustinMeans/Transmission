@@ -170,6 +170,7 @@ private enum WireEnvelopeType: UInt8 {
     case call = 0
     case reply = 1
     case close = 2
+    case error = 3
 }
 
 extension WireEnvelope {
@@ -212,6 +213,26 @@ extension WireEnvelope {
 
         case .close:
             encoder.writeUInt8(WireEnvelopeType.close.rawValue)
+
+        case .error(let failure):
+            encoder.writeUInt8(WireEnvelopeType.error.rawValue)
+            encoder.writeUUID(failure.callID.value)
+            if let sender = failure.sender {
+                encoder.writeUInt8(1)
+                encoder.writeString(sender.id)
+                encoder.writeOptionalString(sender.node?.id)
+            } else {
+                encoder.writeUInt8(0)
+            }
+            encoder.writeUInt8(failure.code.rawValue)
+            encoder.writeOptionalString(failure.errorType)
+            encoder.writeString(failure.message)
+            if let payload = failure.payload {
+                encoder.writeUInt8(1)
+                encoder.writeBytes(payload)
+            } else {
+                encoder.writeUInt8(0)
+            }
         }
 
         return encoder.data
@@ -318,7 +339,31 @@ extension WireEnvelope {
 
         case .close:
             return .close
+
+        case .error:
+            let callID = CallID(try decoder.readUUID())
+            var sender: ActorIdentity?
+            if try decoder.readUInt8() == 1 {
+                let actorID = try decoder.readString()
+                let node = try decoder.readOptionalString().map { NodeIdentity(id: $0) }
+                sender = ActorIdentity(id: actorID, node: node)
+            }
+            let code = RemoteCallError.Code(rawValue: try decoder.readUInt8()) ?? .unknown
+            let errorType = try decoder.readOptionalString()
+            let message = try decoder.readString()
+            let payload = try decoder.readUInt8() == 1 ? try decoder.readBytes() : nil
+            // Unlike `.call` and `.reply`, trailing bytes are tolerated: this
+            // envelope is new enough to be born extensible.
+            return .error(ErrorEnvelope(
+                callID: callID, sender: sender, code: code,
+                errorType: errorType, message: message, payload: payload))
         }
+    }
+
+    /// Compact format starts with its type byte. JSON starts with '{' (0x7B).
+    static func looksCompact(_ data: Data) -> Bool {
+        guard let first = data.first else { return false }
+        return WireEnvelopeType(rawValue: first) != nil
     }
 }
 

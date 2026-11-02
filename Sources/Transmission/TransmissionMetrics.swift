@@ -2,7 +2,7 @@ import Foundation
 import Metrics
 
 /// Metrics collection for Transmission.
-public final class TransmissionMetrics: Sendable {
+public final class TransmissionMetrics: @unchecked Sendable {
     private let nodeID: NodeIdentity
 
     private let callCounter: Counter
@@ -13,6 +13,8 @@ public final class TransmissionMetrics: Sendable {
     private let bytesIn: Counter
     private let bytesOut: Counter
     private let errors: Counter
+    private let lock = NSLock()
+    private var connectionCount = 0
 
     init(nodeID: NodeIdentity) {
         self.nodeID = nodeID
@@ -43,12 +45,24 @@ public final class TransmissionMetrics: Sendable {
         callDuration.recordNanoseconds(nanoseconds)
     }
 
-    func connectionOpened() {
-        activeConnections.record(1)
+    /// `Gauge.record` sets the value rather than adding to it.
+    public func connectionOpened() {
+        activeConnections.record(adjustConnections(by: 1))
     }
 
-    func connectionClosed() {
-        activeConnections.record(-1)
+    public func connectionClosed() {
+        activeConnections.record(adjustConnections(by: -1))
+    }
+
+    private func adjustConnections(by delta: Int) -> Int {
+        lock.withLock {
+            connectionCount += delta
+            return connectionCount
+        }
+    }
+
+    var activeConnectionCount: Int {
+        lock.withLock { connectionCount }
     }
 
     func recordMessageSent(bytes: Int) {

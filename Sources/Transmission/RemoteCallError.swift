@@ -23,6 +23,11 @@ public struct RemoteCallError: Error, Sendable, CustomStringConvertible {
         case overloaded = 6
         /// The reply exceeds the configured frame limit.
         case frameTooLarge = 7
+
+        public init(from decoder: any Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(UInt8.self)
+            self = Code(rawValue: raw) ?? .unknown
+        }
     }
 
     public let callID: CallID

@@ -213,6 +213,31 @@ struct VaporEndToEndTests {
         }
     }
 
+    @Test("onConnect runs before the first dispatch and identifies the caller")
+    func onConnectIdentity() async throws {
+        try await withVaporServer(onConnect: { request, node in
+            try await Task.sleep(for: .milliseconds(50))
+            await node.setUserInfo("user", value: request.headers.first(name: "X-User"))
+        }) { _, _, port in
+            let client = try await connectedClient(
+                port: port, options: .init(headers: ["X-User": "justin"]), serverID: "mainframe")
+            defer { Task { await client.disconnect() } }
+            let remote = try RegSvc.resolve(id: ActorIdentity(id: "svc", node: "mainframe"), using: client)
+            #expect(try await remote.userTag() == "justin")
+        }
+    }
+
+    @Test("a throwing onConnect closes the socket")
+    func onConnectRejects() async throws {
+        try await withVaporServer(onConnect: { _, _ in throw Abort(.forbidden) }) { server, _, port in
+            let raw = try RawSocketClient(port: port, path: "/transmission")
+            defer { raw.shutdown() }
+            let closed = await eventually(within: .seconds(2)) { raw.peerClosed }
+            #expect(closed)
+            #expect(await server.nodes.connectedNodes.isEmpty)
+        }
+    }
+
     @Test("oversize fails the call and keeps the connection over Vapor")
     func oversizeOverVapor() async throws {
         try await withVaporServer(configure: { $0.maxFrameSize = 1 << 20 }) { _, _, port in
@@ -273,6 +298,7 @@ private func withVaporApp<T: Sendable>(
     app.logger.logLevel = .critical
     app.http.server.configuration.hostname = "127.0.0.1"
     app.http.server.configuration.port = 0
+    app.http.server.configuration.shutdownTimeout = .milliseconds(100)
     let server = TransmissionSystem.server(id: "mainframe")
     try app.transmission.register(server)
     try app.transmission.configure(path: "transmission")

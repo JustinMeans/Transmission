@@ -1,15 +1,6 @@
 import Foundation
 import Logging
 
-/// Connection status for monitoring.
-public enum ConnectionStatus: Sendable, Equatable {
-    case disconnected
-    case connecting
-    case connected
-    case reconnecting(attempt: Int)
-    case failed(String)
-}
-
 /// A resilient connection that automatically reconnects on failure.
 public actor ResilientConnection {
     public typealias ConnectionAction = @Sendable () async throws -> Void

@@ -200,6 +200,6 @@ struct FrameAccumulatorTests {
 
     @Test("Default cap is 16 MiB")
     func defaultCapValue() {
-        #expect(FrameAccumulator.defaultMaxMessageSize == 16 * 1024 * 1024)
+        #expect(FrameAccumulator.defaultMaxMessageSize == TransmissionSystem.defaultMaxFrameSize)
     }
 }
