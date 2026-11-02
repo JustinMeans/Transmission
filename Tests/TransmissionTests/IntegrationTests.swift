@@ -185,7 +185,6 @@ struct IntegrationTests {
 
     @Test("Priority queue processes high priority first under load")
     func priorityQueueUnderLoad() async {
-        _ = PriorityMessageQueue()
 
         for i in 0..<100 {
             let priority: MessagePriority = switch i % 4 {

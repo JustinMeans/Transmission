@@ -1,6 +1,6 @@
 # Transmission
 
-Real-time distributed actor communication for Swift. Built for production use in financial applications and immersive experiences.
+Real-time distributed actor communication for Swift, plus `TransmissionLive`, a versioned stream protocol for live data.
 
 ## Overview
 
@@ -8,14 +8,21 @@ Transmission provides transparent RPC over WebSockets using Swift's distributed 
 
 ## Features
 
-- Swift 6 with full Sendable compliance
+- Swift 6 language mode
 - Bidirectional communication (server push supported)
 - Vapor integration for server-side use
-- JWT authentication built-in
-- Binary serialization for low-latency paths
-- Priority message queues (realtime, high, normal, low)
-- Automatic reconnection with exponential backoff
-- Comprehensive metrics via swift-metrics
+- Remote errors reach the caller: thrown errors, version-skewed targets and unknown actors all fail the call
+- Compact binary call envelope; arguments and results are JSON
+- Per-connection dispatch with bounded concurrency and per-actor ordering
+- Automatic reconnection with exponential backoff, `reconnectNow()` and `disconnect()`
+- WebSocket ping/pong dead-peer detection
+- Metrics via swift-metrics
+
+**Authentication is not built in.** A Vapor route is open unless you pass auth middleware to `configure`. See [Authentication](#authentication).
+
+**Wire stability.** Distributed method targets are mangled names, so a source-compatible change such as adding a defaulted parameter changes the wire identity. A call to a target the peer lacks now fails with `RemoteCallError.Code.targetNotFound`, but it still fails. Use `TransmissionLive` for anything that must survive independently shipped clients.
+
+**Linux clients.** `wss://` is refused on the NIOPosix client path until it has TLS. Plain `ws://` works.
 
 ## Requirements
 
@@ -69,12 +76,16 @@ public distributed actor Calculator {
 import TransmissionVapor
 
 func configure(_ app: Application) async throws {
-    let transmission = try TransmissionSystem.server(id: "main")
-    try await app.transmission.register(transmission)
+    let transmission = TransmissionSystem.server(id: "main")
+    try app.transmission.register(transmission)
+    try app.transmission.configure(path: "transmission", middleware: [MyAuthMiddleware()])
 
-    // Register actors
-    let calc = Calculator(actorSystem: transmission)
-    await transmission.registerLocalActor(calc, id: "calculator")
+    // The system keeps actors made with makeLocalActor alive until
+    // releaseLocalActor(id:). Actors made with Actor(actorSystem:) are held
+    // weakly and resign when released.
+    transmission.makeLocalActor(id: "calculator") {
+        Calculator(actorSystem: transmission)
+    }
 }
 ```
 
@@ -84,29 +95,55 @@ func configure(_ app: Application) async throws {
 import Transmission
 
 let transmission = TransmissionSystem()
-try await transmission.connect(to: "wss://api.example.com/transmission")
+try await transmission.connect(
+    to: "wss://api.example.com/transmission",
+    options: .init(headerProvider: { ["Authorization": "Bearer \(await token())"] })
+)
 
-let calculator = try Calculator.resolve(id: "calculator", using: transmission)
+let id = ActorIdentity(id: "calculator", node: .server)
+let calculator = try Calculator.resolve(id: id, using: transmission)
 let result = try await calculator.add(40, 2)  // Returns 42
+
+await transmission.reconnectNow()   // network changed or app foregrounded
+await transmission.disconnect()     // stays down until the next connect
 ```
 
-## Architecture
+## Authentication
 
+Run auth as Vapor middleware, which rejects before the upgrade. `onConnect` runs before the connection's first call, so an authenticated identity can be copied onto the node:
+
+```swift
+try app.transmission.configure(
+    path: "transmission",
+    middleware: [MyAuthMiddleware()],
+    onConnect: { request, node in
+        await node.setUserInfo("user", value: try request.auth.require(User.self).id)
+    }
+)
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Transmission Layer                          │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌───────────┐ │
-│  │  Vapor   │◄──►│  Vapor   │◄──►│  Vapor   │◄──►│  Clients  │ │
-│  │ Server A │    │ Server B │    │ Server C │    │ iOS/macOS │ │
-│  └──────────┘    └──────────┘    └──────────┘    └───────────┘ │
-│       ▲              ▲              ▲                  ▲        │
-│       └──────────────┴──────────────┴──────────────────┘        │
-│                 WebSocket Distributed Actors                     │
-└─────────────────────────────────────────────────────────────────┘
+
+Handlers read it through `RemoteNode.current`:
+
+```swift
+distributed func secrets() async throws -> [Secret] {
+    guard let user: UUID = await RemoteNode.current?.getUserInfo("user") else {
+        throw Denied()
+    }
+    return try await store.secrets(for: user)
+}
 ```
+
+## Errors
+
+A failed call throws `RemoteCallError`. Only a `Codable` error's contents cross the wire, in `payload`, and a `throws(MyError)` method gets its own type back. Any other error sends its type name alone, so internals do not leak to callers.
+
+## Live data
+
+Do not stream metrics or logs through distributed calls. Use `TransmissionLive` (client and hub, no Vapor dependency) and `TransmissionLiveVapor` (the `/v3/live` route). It has sequence numbers, snapshots, resume, coalescing and per-client backpressure. The protocol is specified in [Docs/LiveProtocol.md](Docs/LiveProtocol.md).
 
 ## Use Cases
+
+Handlers run concurrently, except that calls from one connection to one actor start in order (`DispatchLimits`). These are sketches.
 
 ### Real-time Chat
 
@@ -124,27 +161,6 @@ distributed actor ChatRoom {
 
     distributed func history(limit: Int) async -> [Message] {
         Array(messages.suffix(limit))
-    }
-}
-```
-
-### Live Metrics Dashboard
-
-```swift
-distributed actor MetricsCollector {
-    public typealias ActorSystem = TransmissionSystem
-
-    distributed func currentStats() async -> SystemStats {
-        SystemStats(
-            cpuUsage: getCPUUsage(),
-            memoryUsage: getMemoryUsage(),
-            activeConnections: connectionCount,
-            requestsPerSecond: rps
-        )
-    }
-
-    distributed func subscribe(to metrics: [MetricType]) async -> AsyncStream<MetricUpdate> {
-        // Push real-time metric updates to client
     }
 }
 ```
@@ -167,18 +183,6 @@ distributed actor GameWorld {
         // Broadcast to other players
     }
 }
-```
-
-## Priority Queues
-
-Messages can be assigned priority levels for proper ordering under load:
-
-```swift
-// Set priority on the encoder
-encoder.priority = .realtime  // For time-critical updates
-encoder.priority = .high      // For important operations
-encoder.priority = .normal    // Default
-encoder.priority = .low       // Background tasks
 ```
 
 ## License
