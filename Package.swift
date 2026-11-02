@@ -14,6 +14,8 @@ let package = Package(
     products: [
         .library(name: "Transmission", targets: ["Transmission"]),
         .library(name: "TransmissionVapor", targets: ["TransmissionVapor"]),
+        .library(name: "TransmissionLive", targets: ["TransmissionLive"]),
+        .library(name: "TransmissionLiveVapor", targets: ["TransmissionLiveVapor"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.70.0"),
@@ -51,6 +53,27 @@ let package = Package(
             ]
         ),
         .target(
+            name: "TransmissionLive",
+            dependencies: [
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "TransmissionLiveVapor",
+            dependencies: [
+                "TransmissionLive",
+                .product(name: "Vapor", package: "vapor"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
             name: "TransmissionTestSupport",
             path: "Tests/TestSupport",
             swiftSettings: [
@@ -64,6 +87,18 @@ let package = Package(
                 "TransmissionVapor",
                 "TransmissionTestSupport",
             ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "TransmissionLiveTests",
+            dependencies: [
+                "TransmissionLive",
+                "TransmissionLiveVapor",
+                "TransmissionTestSupport",
+            ],
+            resources: [.copy("Fixtures")],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
