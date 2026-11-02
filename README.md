@@ -49,6 +49,8 @@ For Vapor servers:
 .target(name: "MyServer", dependencies: ["TransmissionVapor"])
 ```
 
+For live data, depend on `TransmissionLive` (client and hub) or `TransmissionLiveVapor` (server route). Neither needs `Transmission`.
+
 ## Quick Start
 
 ### Define a Distributed Actor
@@ -139,7 +141,36 @@ A failed call throws `RemoteCallError`. Only a `Codable` error's contents cross 
 
 ## Live data
 
-Do not stream metrics or logs through distributed calls. Use `TransmissionLive` (client and hub, no Vapor dependency) and `TransmissionLiveVapor` (the `/v3/live` route). It has sequence numbers, snapshots, resume, coalescing and per-client backpressure. The protocol is specified in [Docs/LiveProtocol.md](Docs/LiveProtocol.md).
+Do not stream metrics or logs through distributed calls. Use `TransmissionLive` (client and hub, no Vapor dependency) and `TransmissionLiveVapor` (the `/v3/live` route). It has sequence numbers, snapshots, resume, coalescing and per-client backpressure. A slow client costs nobody else anything, and clients on different builds negotiate a protocol version rather than going blank. The protocol is specified in [Docs/LiveProtocol.md](Docs/LiveProtocol.md).
+
+```swift
+// Shared by client and server.
+let statistics = Topic<[String: Double], [String: Double]>(
+    name: "statistics", kind: .state,
+    merge: { earlier, later in earlier.merge(later) { _, new in new } },
+    apply: { state, delta in state.merge(delta) { _, new in new } }
+)
+
+// Server.
+let hub = LiveHub(authorizer: MyRules())
+try await hub.host(statistics, initial: [:])
+app.live.mount(hub: hub) { _, token in try await identity(for: token) }
+try await hub.publish(statistics, ["requests": 1042])
+
+// Client.
+let live = LiveClient(configuration: .init(
+    url: url, clientID: installID, build: build, tokenProvider: { await token() }
+))
+await live.start()
+let subscription = await live.subscribe(statistics, maxHz: 1)
+for await update in subscription.updates {
+    store.statistics = update.state
+    store.freshness = update.freshness   // .live, .stale(since:) or .resyncing
+}
+
+await live.pause()    // app background
+await live.resume()   // app foreground
+```
 
 ## Use Cases
 
