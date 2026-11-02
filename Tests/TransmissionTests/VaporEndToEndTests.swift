@@ -232,9 +232,10 @@ struct VaporEndToEndTests {
         try await withVaporServer(onConnect: { _, _ in throw Abort(.forbidden) }) { server, _, port in
             let raw = try RawSocketClient(port: port, path: "/transmission")
             defer { raw.shutdown() }
-            let closed = await eventually(within: .seconds(2)) { raw.peerClosed }
+            let closed = await eventually(within: .seconds(2)) { raw.sawClose }
             #expect(closed)
-            #expect(await server.nodes.connectedNodes.isEmpty)
+            let gone = await eventually(within: .seconds(2)) { await server.nodes.connectedNodes.isEmpty }
+            #expect(gone)
         }
     }
 

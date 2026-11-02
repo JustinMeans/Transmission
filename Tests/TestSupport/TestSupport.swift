@@ -148,6 +148,14 @@ public final class RawSocketClient: @unchecked Sendable {
         }
     }
 
+    /// True once the server has sent a Close frame or dropped the socket.
+    public var sawClose: Bool {
+        var byte: UInt8 = 0
+        let count = recv(fd, &byte, 1, Int32(MSG_DONTWAIT))
+        if count == 0 { return true }
+        return count == 1 && byte == 0x88
+    }
+
     /// Writes one masked binary frame.
     public func sendBinary(_ payload: [UInt8]) {
         var frame: [UInt8] = [0x82]

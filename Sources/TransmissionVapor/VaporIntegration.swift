@@ -169,9 +169,10 @@ public actor VaporWebSocketBridge {
         guard !isClosed else { return }
         isClosed = true
         dispatcher.shutdown()
-        try? await ws.close(code: .normalClosure)
         system.metrics.connectionClosed()
         await system.nodeDidDisconnect(remoteNode)
+        // Last: this waits for the peer's Close, which a dead peer never sends.
+        try? await ws.close(code: .normalClosure)
     }
 
     /// Sends a wire envelope through the WebSocket.
