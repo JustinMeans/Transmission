@@ -232,11 +232,14 @@ struct LiveVaporTests {
             let stalledOnly = LoadPhase(samples.take())
 
             let flaps = Counter()
-            let flappers = (0..<15).map { _ in
-                Task {
-                    while !Task.isCancelled {
+            // Real threads: the sockets block, which must not eat the cooperative
+            // pool the healthy clients and the server run on.
+            let stopFlapping = Counter()
+            for _ in 0..<15 {
+                Thread.detachNewThread {
+                    while stopFlapping.value == 0 {
                         if let raw = try? flappingReader(port: port, topic: tickTopic) {
-                            try? await Task.sleep(for: .milliseconds(Int.random(in: 50...150)))
+                            usleep(UInt32.random(in: 50_000...150_000))
                             raw.shutdown()
                             flaps.increment()
                         }
@@ -248,8 +251,7 @@ struct LiveVaporTests {
             try await publish(for: .seconds(3))
             try await Task.sleep(for: .milliseconds(100))
             let adversarial = LoadPhase(samples.take())
-            flappers.forEach { $0.cancel() }
-            for task in flappers { await task.value }
+            stopFlapping.increment()
 
             print("LOAD sockets baseline p50=\(baseline.p50)ms p99=\(baseline.p99)ms n=\(baseline.count)")
             print("LOAD sockets stalled-only p50=\(stalledOnly.p50)ms p99=\(stalledOnly.p99)ms n=\(stalledOnly.count)")
@@ -267,7 +269,7 @@ struct LiveVaporTests {
             // Flappers are raw sockets on purpose. As URLSession clients in this same
             // process, their session churn pushed p99 past 300 ms on the client side,
             // which says nothing about the hub.
-            #expect(adversarial.p99 <= max(baseline.p99 * 4, baseline.p99 + 50),
+            #expect(adversarial.p99 <= max(baseline.p99 * 4, baseline.p99 + 25),
                     "p99 moved: \(baseline.p99) -> \(adversarial.p99)")
             for client in healthy { await client.stop() }
             stalled.forEach { $0.shutdown() }
