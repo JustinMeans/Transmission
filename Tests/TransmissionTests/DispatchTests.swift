@@ -202,8 +202,7 @@ struct DispatchTests {
         server.dispatchLimits = DispatchLimits(maxConcurrentCalls: 4, ordering: .concurrent)
         let service = server.makeLocalActor(id: "svc") { RegSvc(actorSystem: server, context: context) }
         _ = service
-        let port = freePort()
-        let task = Task { try await server.runServer(at: address(port)) }
+        let (task, port) = try await startServer(server)
         defer { task.cancel() }
         let client = try await connectedClient(port: port, serverID: "srv")
         defer { Task { await client.disconnect() } }
@@ -265,8 +264,7 @@ struct DispatchTests {
         let server = TransmissionSystem.server(id: "srv")
         let service = server.makeLocalActor(id: "svc") { RegSvc(actorSystem: server, context: context) }
         _ = service
-        let port = freePort()
-        let task = Task { try await server.runServer(at: address(port)) }
+        let (task, port) = try await startServer(server)
         defer { task.cancel() }
         let client = try await connectedClient(port: port, serverID: "srv")
         let remote = try RegSvc.resolve(id: ActorIdentity(id: "svc", node: "srv"), using: client)

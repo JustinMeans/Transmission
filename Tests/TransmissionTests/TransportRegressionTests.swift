@@ -79,8 +79,7 @@ struct TransportRegressionTests {
         let server = TransmissionSystem.server(id: "srv")
         let service = server.makeLocalActor(id: "svc") { RegSvc(actorSystem: server, context: context) }
         _ = service
-        let port = freePort()
-        let task = Task { try await server.runServer(at: address(port)) }
+        let (task, port) = try await startServer(server)
         defer { task.cancel() }
         let client = try await connectedClient(id: "cli-e4", port: port, serverID: "srv")
         defer { Task { await client.disconnect() } }
@@ -366,8 +365,7 @@ struct TransportRegressionTests {
         let server = TransmissionSystem.server(id: "srv")
         let service = server.makeLocalActor(id: "svc") { RegSvc(actorSystem: server, context: context) }
         _ = service
-        let port = freePort()
-        let task = Task { try await server.runServer(at: address(port)) }
+        let (task, port) = try await startServer(server)
         defer { task.cancel() }
         let client = try await connectedClient(port: port, serverID: "srv")
         defer { Task { await client.disconnect() } }

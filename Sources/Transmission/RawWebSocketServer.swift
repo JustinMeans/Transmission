@@ -46,7 +46,12 @@ public actor RawWebSocketServer {
         self.httpHandler = httpHandler
     }
 
-    public func run(host: String = "127.0.0.1", port: Int = 8080, onConnection handler: @escaping RawWebSocketHandler) async throws {
+    public func run(
+        host: String = "127.0.0.1",
+        port: Int = 8080,
+        onBound: (@Sendable (Int) -> Void)? = nil,
+        onConnection handler: @escaping RawWebSocketHandler
+    ) async throws {
         guard !isRunning else { return }
         isRunning = true
 
@@ -85,6 +90,9 @@ public actor RawWebSocketServer {
             }
 
         logger.info("Raw WebSocket server listening on \(host):\(port)")
+        if let boundPort = serverChannel.channel.localAddress?.port {
+            onBound?(boundPort)
+        }
 
         try await withThrowingDiscardingTaskGroup { group in
             try await serverChannel.executeThenClose { inbound in

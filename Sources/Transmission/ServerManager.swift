@@ -13,7 +13,9 @@ public actor ServerManager {
         self.system = system
     }
 
-    public func start(at address: ServerAddress) async throws {
+    /// Runs until cancelled. `onBound` reports the listening port, which is how a
+    /// caller binding port 0 learns what it got.
+    public func start(at address: ServerAddress, onBound: (@Sendable (Int) -> Void)? = nil) async throws {
         guard !isRunning else { return }
         isRunning = true
 
@@ -65,6 +67,9 @@ public actor ServerManager {
             }
 
         system.logger.info("Server listening on \(address)")
+        if let port = serverChannel.channel.localAddress?.port {
+            onBound?(port)
+        }
 
         let systemRef = system
 
@@ -283,9 +288,9 @@ private final class HTTPNotFoundHandler: ChannelInboundHandler, RemovableChannel
 }
 
 extension TransmissionSystem {
-    public func runServer(at address: ServerAddress) async throws {
+    public func runServer(at address: ServerAddress, onBound: (@Sendable (Int) -> Void)? = nil) async throws {
         let server = ServerManager(system: self)
-        try await server.start(at: address)
+        try await server.start(at: address, onBound: onBound)
     }
 
     public func runServer(host: String = "0.0.0.0", port: Int = 8080) async throws {

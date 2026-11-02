@@ -183,28 +183,6 @@ struct IntegrationTests {
         #expect(serverActor.node != clientActor.node)
     }
 
-    @Test("Priority queue processes high priority first under load")
-    func priorityQueueUnderLoad() async {
-
-        for i in 0..<100 {
-            let priority: MessagePriority = switch i % 4 {
-            case 0: .low
-            case 1: .normal
-            case 2: .high
-            default: .realtime
-            }
-
-            _ = CallEnvelope(
-                callID: CallID(),
-                recipient: ActorIdentity(id: "test-\(i)"),
-                target: "method()",
-                genericSubs: [],
-                args: [],
-                priority: priority
-            )
-        }
-    }
-
     @Test("Serialization format selection")
     func serializationFormatSelection() {
         #expect(SerializationFormat.json != SerializationFormat.binary)

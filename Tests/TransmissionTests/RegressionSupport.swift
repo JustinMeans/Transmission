@@ -93,10 +93,8 @@ func withNIOServer<T: Sendable>(
     let server = TransmissionSystem.server(id: id)
     configure(server)
     let service = server.makeLocalActor(id: "svc") { RegSvc(actorSystem: server) }
-    let port = freePort()
-    let task = Task { try await server.runServer(at: address(port)) }
+    let (task, port) = try await startServer(server)
     defer { task.cancel() }
-    await eventually { (try? tcpPortAccepts(port)) == true }
     return try await body(server, service, port)
 }
 
@@ -176,15 +174,27 @@ func withRawServer<T: Sendable>(
     _ body: @Sendable (Int) async throws -> T
 ) async throws -> T {
     let raw = RawWebSocketServer()
-    let port = freePort()
-    let task = Task { try await raw.run(port: port, onConnection: handler) }
+    let bound = PortBox()
+    let task = Task { try await raw.run(port: 0, onBound: { bound.set($0) }, onConnection: handler) }
     defer { task.cancel() }
-    await eventually { (try? tcpProbe(port)) == true }
-    return try await body(port)
+    return try await body(try await bound.value())
 }
 
-func tcpProbe(_ port: Int) throws -> Bool {
-    try tcpPortAccepts(port)
+/// Starts a NIO server on an OS-assigned port and waits until it listens.
+func startServer(_ server: TransmissionSystem) async throws -> (Task<Void, any Error>, Int) {
+    let bound = PortBox()
+    let task = Task { try await server.runServer(at: address(0), onBound: { bound.set($0) }) }
+    return (task, try await bound.value())
+}
+
+final class PortBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var port: Int?
+    func set(_ value: Int) { lock.withLock { port = value } }
+    func value() async throws -> Int {
+        await eventually { self.lock.withLock { self.port != nil } }
+        return try #require(lock.withLock { port })
+    }
 }
 
 actor Counter {

@@ -5,6 +5,14 @@ import Darwin
 import Glibc
 #endif
 
+#if canImport(Darwin)
+private let streamSocket = SOCK_STREAM
+private let dontWait = Int32(MSG_DONTWAIT)
+#else
+private let streamSocket = Int32(SOCK_STREAM.rawValue)
+private let dontWait = Int32(MSG_DONTWAIT.rawValue)
+#endif
+
 public struct DeadlineExceeded: Error, CustomStringConvertible {
     public let label: String
     public init(label: String) { self.label = label }
@@ -45,43 +53,6 @@ public func eventually(
     return await condition()
 }
 
-/// An unused loopback TCP port.
-public func freePort() -> Int {
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
-    precondition(fd >= 0)
-    defer { close(fd) }
-    var address = sockaddr_in()
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = 0
-    address.sin_addr.s_addr = inet_addr("127.0.0.1")
-    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let bound = withUnsafePointer(to: &address) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, length) }
-    }
-    precondition(bound == 0)
-    _ = withUnsafeMutablePointer(to: &address) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
-    }
-    return Int(UInt16(bigEndian: address.sin_port))
-}
-
-/// True if something accepts TCP on the port. Sends no bytes, so it cannot be
-/// mistaken for a WebSocket client by the server under test.
-public func tcpPortAccepts(_ port: Int) throws -> Bool {
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
-    guard fd >= 0 else { throw POSIXError(.EIO) }
-    defer { close(fd) }
-    var address = sockaddr_in()
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = UInt16(port).bigEndian
-    address.sin_addr.s_addr = inet_addr("127.0.0.1")
-    return withUnsafePointer(to: &address) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
-        }
-    }
-}
-
 /// Nearest-rank percentile; `p` in 0...100.
 public func percentile(_ values: [Double], _ p: Double) -> Double {
     guard !values.isEmpty else { return 0 }
@@ -105,7 +76,7 @@ public final class RawSocketClient: @unchecked Sendable {
         headers: [String: String] = [:],
         receiveBuffer: Int32? = nil
     ) throws {
-        fd = socket(AF_INET, SOCK_STREAM, 0)
+        fd = socket(AF_INET, streamSocket, 0)
         guard fd >= 0 else { throw POSIXError(.EIO) }
         if var size = receiveBuffer {
             setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size))
@@ -142,7 +113,7 @@ public final class RawSocketClient: @unchecked Sendable {
     public var peerClosed: Bool {
         var buffer = [UInt8](repeating: 0, count: 65536)
         while true {
-            let count = recv(fd, &buffer, buffer.count, Int32(MSG_DONTWAIT))
+            let count = recv(fd, &buffer, buffer.count, dontWait)
             if count == 0 { return true }
             if count < 0 { return errno != EAGAIN && errno != EWOULDBLOCK }
         }
@@ -151,7 +122,7 @@ public final class RawSocketClient: @unchecked Sendable {
     /// True once the server has sent a Close frame or dropped the socket.
     public var sawClose: Bool {
         var byte: UInt8 = 0
-        let count = recv(fd, &byte, 1, Int32(MSG_DONTWAIT))
+        let count = recv(fd, &byte, 1, dontWait)
         if count == 0 { return true }
         return count == 1 && byte == 0x88
     }
