@@ -256,6 +256,23 @@ public final class TransmissionSystem: DistributedActorSystem, @unchecked Sendab
         await pendingCalls.cancelAll(for: nodeID)
     }
 
+    /// STUB: forwards by id until the stale-close fix lands.
+    public func nodeDidDisconnect(_ node: RemoteNode) async {
+        await nodeDidDisconnect(node.nodeID)
+    }
+
+    /// STUB: no behaviour yet.
+    public func disconnect() async {}
+
+    /// STUB: no behaviour yet.
+    public func reconnectNow() async {}
+
+    /// STUB: not yet honoured.
+    public var maxFrameSize: Int { get { 64 << 20 } set {} }
+
+    /// STUB: not yet honoured.
+    public var callTimeout: Duration { get { .seconds(30) } set {} }
+
     // MARK: - Message Handling
 
     /// Decodes and delivers an incoming message from a remote node.

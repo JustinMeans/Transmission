@@ -268,6 +268,11 @@ extension TransmissionSystem {
         await client.connect(to: address, onStatus: onStatus)
     }
 
+    /// STUB: options not yet honoured.
+    public func connect(to address: ServerAddress, options: TransmissionClientOptions, onStatus: (@Sendable (ConnectionStatus) async -> Void)? = nil) async throws {
+        try await connect(to: address, onStatus: onStatus)
+    }
+
     public func connect(to url: String, onStatus: (@Sendable (ConnectionStatus) async -> Void)? = nil) async throws {
         guard let address = ServerAddress(url: url) else {
             throw TransmissionError.invalidURL(url)

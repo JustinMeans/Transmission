@@ -5,7 +5,7 @@ import Logging
 
 /// Represents a connection to a remote node in the Transmission network.
 public actor RemoteNode {
-    public let nodeID: NodeIdentity
+    public nonisolated let nodeID: NodeIdentity
 
     // NIO-based connection (used by clients)
     private let channel: NIOAsyncChannel<WebSocketFrame, WebSocketFrame>?

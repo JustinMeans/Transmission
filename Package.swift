@@ -50,9 +50,20 @@ let package = Package(
                 .enableExperimentalFeature("StrictConcurrency"),
             ]
         ),
+        .target(
+            name: "TransmissionTestSupport",
+            path: "Tests/TestSupport",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
         .testTarget(
             name: "TransmissionTests",
-            dependencies: ["Transmission", "TransmissionVapor"],
+            dependencies: [
+                "Transmission",
+                "TransmissionVapor",
+                "TransmissionTestSupport",
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
